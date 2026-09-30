@@ -1,0 +1,31 @@
+# segredos: nunca commitar
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+orbix_deploy*
+*-keypair.json
+infra/*.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.vercel/
+
+# sistema
+.DS_Store
+Thumbs.db

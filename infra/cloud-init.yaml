@@ -1,0 +1,103 @@
+#cloud-config
+# Orbix Declare · droplet da API (Ubuntu 24.04, s-1vcpu-1gb)
+# Roda uma vez no primeiro boot. Nenhum segredo aqui: só a chave SSH pública.
+
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - unattended-upgrades
+  - fail2ban
+
+users:
+  - name: erik
+    shell: /bin/bash
+    groups: [sudo]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOjk31OIEneZctclt3a0mTU0HA/Gw005WTlNzMFFyBpF orbix-deploy
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-orbix-hardening.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      AuthenticationMethods publickey
+      AllowUsers erik
+      MaxAuthTries 3
+      LoginGraceTime 20
+      X11Forwarding no
+      AllowAgentForwarding no
+      AllowTcpForwarding no
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+      APT::Periodic::AutocleanInterval "7";
+
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled = true
+      maxretry = 3
+      findtime = 10m
+      bantime = 1h
+
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "no-new-privileges": true,
+        "live-restore": true,
+        "userland-proxy": false
+      }
+
+  - path: /etc/sysctl.d/99-orbix.conf
+    permissions: "0644"
+    content: |
+      vm.swappiness = 10
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv6.conf.all.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.tcp_syncookies = 1
+      kernel.kptr_restrict = 2
+      kernel.dmesg_restrict = 1
+
+runcmd:
+  # swap de 2 GB: a droplet tem só 1 GB de RAM
+  - fallocate -l 2G /swapfile
+  - chmod 600 /swapfile
+  - mkswap /swapfile
+  - swapon /swapfile
+  - echo '/swapfile none swap sw 0 0' >> /etc/fstab
+  - sysctl --system
+
+  # Docker pelo repositório oficial (chave GPG verificada pelo apt)
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  - usermod -aG docker erik
+  - systemctl enable --now docker
+
+  # diretório da aplicação; .env de cada serviço fica aqui com chmod 600
+  - install -d -m 0750 -o erik -g erik /opt/orbix
+
+  - systemctl enable --now fail2ban
+  - systemctl restart ssh
+  - touch /var/lib/cloud/orbix-ready

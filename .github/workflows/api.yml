@@ -1,0 +1,60 @@
+name: api
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: api-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.21"
+      - run: uv sync --frozen
+      - name: ruff
+        run: uv run ruff check .
+      - name: mypy
+        run: uv run mypy src
+      - name: pytest
+        run: uv run pytest -q
+      - name: bandit
+        run: uv run bandit -q -r src
+      - name: pip-audit
+        run: |
+          uv export --frozen --no-dev --no-emit-project --format requirements-txt -o /tmp/req.txt
+          uv run pip-audit -r /tmp/req.txt --disable-pip --strict
+
+  image:
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: build
+        run: docker build -t orbix-api:${{ github.sha }} .
+      - name: trivy (bloqueia CRITICAL e HIGH com correção disponível)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: orbix-api:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: segredo não pode estar na imagem
+        run: |
+          ! docker run --rm --entrypoint sh orbix-api:${{ github.sha }} -c 'ls -a /app' | grep -E '^\.env'
+      # push para o registry e deploy entram quando o registry e o domínio existirem
