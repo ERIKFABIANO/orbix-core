@@ -19,8 +19,23 @@ def _migration_url() -> str:
     return url
 
 
+# Schema fora do alcance da API REST do Supabase. Em `public`, tabela nova ganha grants
+# automáticos para anon/authenticated e o controle de versão ficaria exposto.
+VERSION_SCHEMA = "orbix_private"
+
+
 def _run(connection) -> None:  # type: ignore[no-untyped-def]
-    context.configure(connection=connection, target_metadata=None, transaction_per_migration=True)
+    connection.exec_driver_sql(f"create schema if not exists {VERSION_SCHEMA}")
+    connection.exec_driver_sql(
+        f"revoke all on schema {VERSION_SCHEMA} from public, anon, authenticated"
+    )
+    connection.commit()
+    context.configure(
+        connection=connection,
+        target_metadata=None,
+        transaction_per_migration=True,
+        version_table_schema=VERSION_SCHEMA,
+    )
     with context.begin_transaction():
         context.run_migrations()
 
