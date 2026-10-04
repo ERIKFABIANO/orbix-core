@@ -1,16 +1,20 @@
 # orbix-core
 
 Back-end do **Orbix Declare**: lê carteiras Solana e Hyperliquid, converte cada evento para reais
-pela PTAX do Banco Central, calcula a DeCripto do mês, explica com um agente de IA e registra o
-hash do relatório na Solana.
+pela PTAX do Banco Central, calcula o relatório mensal, explica os números com um agente de IA e
+registra o hash do relatório na Solana.
+
+- Estado atual, rotas, regras de cálculo e pendências: [docs/STATUS.md](docs/STATUS.md)
+- O que o front precisa mudar: [docs/FRONT_CHANGES.md](docs/FRONT_CHANGES.md)
 
 ## Stack
 
-- Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2 async + asyncpg, Alembic
-- arq + Redis para jobs (ingestão, preços, atestação)
-- Supabase (Postgres com RLS + Auth Sign-In With Solana)
-- Cloudflare R2 para arquivos, Cloudflare na frente da API
-- Docker na DigitalOcean (Caddy + API + worker + Redis)
+- Python 3.12, FastAPI, Pydantic v2, asyncpg; migrações com Alembic
+- arq + Redis para jobs (leitura de carteiras, cotação, gravação do hash)
+- Postgres no Supabase, com RLS. O login é do próprio back-end (carteira, e-mail, Google, GitHub)
+- Helius (Solana), API pública da Hyperliquid, CoinGecko, PTAX do Banco Central
+- OpenAI para o agente; Resend para e-mail; Cloudflare R2 para arquivos
+- Docker Compose na DigitalOcean, atrás da Cloudflare
 
 ## Rodar local
 
@@ -22,9 +26,12 @@ uv run uvicorn orbix.main:app --reload
 uv run arq orbix.worker.WorkerSettings
 ```
 
-## Qualidade e segurança
+## Testes e verificações
+
+Os testes de integração usam um Postgres local igual ao schema de produção (precisa de Docker).
 
 ```bash
+uv run python scripts/testdb.py up
 uv run pytest -q
 uv run ruff check .
 uv run mypy src
@@ -38,16 +45,20 @@ uvx pre-commit install            # gitleaks + ruff antes de cada commit
 uv run alembic upgrade head       # usa MIGRATION_DATABASE_URL
 ```
 
+Mudança de banco só por migração neste repositório. Tabela nova em `public` precisa de RLS e de
+`revoke` dos acessos automáticos de `anon` e `authenticated` na mesma migração.
+
 ## Modelo de segurança
 
-- A API conecta como `orbix_api` (sem `BYPASSRLS`) e cada requisição roda como `authenticated`
-  com as claims do JWT do usuário: o RLS do Postgres isola os dados.
+- A API conecta como `orbix_api` (sem `BYPASSRLS`). Para ler dados do usuário, cada requisição
+  assume o papel `authenticated` com o id dele, e o RLS do Postgres isola os dados.
 - O worker conecta como `orbix_worker`, com grants mínimos e sem `DELETE`.
-- JWT do Supabase validado com lista fechada de algoritmos, `aud`, `iss` e `exp`.
+- O usuário é criado por uma função restrita do banco. A chave `service_role` do Supabase não é usada.
+- Token de sessão opaco, guardado só como SHA-256. Códigos de e-mail e nonces de uso único no Redis.
 - Só o container do worker recebe a chave da carteira de memo.
-- O hash gravado na Solana usa salt aleatório; nenhum dado pessoal vai on-chain.
-- Containers sem root, sistema de arquivos somente leitura e sem capabilities; só o Caddy
-  publica portas, e só para a Cloudflare.
+- O hash gravado na Solana é o SHA-256 do CSV, que leva um código aleatório; nenhum dado pessoal vai on-chain.
+- O agente só lê dados do próprio usuário e não tem ferramentas; links de citação são montados pelo servidor.
+- Containers sem root, disco somente leitura e sem capabilities; só o Caddy publica portas, e só para a Cloudflare.
 - CI: ruff, mypy strict, pytest, bandit, pip-audit, Trivy e gitleaks.
 
-O Orbix Declare nunca pede chave privada, seed phrase ou assinatura de transação.
+O Orbix Declare nunca pede chave privada, frase de recuperação ou assinatura de transação.

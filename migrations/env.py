@@ -26,9 +26,7 @@ VERSION_SCHEMA = "orbix_private"
 
 def _run(connection) -> None:  # type: ignore[no-untyped-def]
     connection.exec_driver_sql(f"create schema if not exists {VERSION_SCHEMA}")
-    connection.exec_driver_sql(
-        f"revoke all on schema {VERSION_SCHEMA} from public, anon, authenticated"
-    )
+    connection.exec_driver_sql(f"revoke all on schema {VERSION_SCHEMA} from public, anon, authenticated")
     connection.commit()
     context.configure(
         connection=connection,
@@ -41,9 +39,11 @@ def _run(connection) -> None:  # type: ignore[no-untyped-def]
 
 
 async def run_online() -> None:
-    engine = create_async_engine(
-        _migration_url(), connect_args={"ssl": "require", "statement_cache_size": 0}
-    )
+    connect_args: dict[str, object] = {"statement_cache_size": 0}
+    # só o banco local de testes roda sem TLS
+    if os.environ.get("MIGRATION_DB_SSL", "true").lower() != "false":
+        connect_args["ssl"] = "require"
+    engine = create_async_engine(_migration_url(), connect_args=connect_args)
     async with engine.connect() as conn:
         await conn.run_sync(_run)
     await engine.dispose()

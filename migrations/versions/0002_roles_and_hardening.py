@@ -53,8 +53,7 @@ def upgrade() -> None:
     op.execute("grant update (last_synced_at, verified) on public.wallets to orbix_worker")
     op.execute("grant select, insert, update on public.events to orbix_worker")
     op.execute(
-        "grant select, insert, update on public.prices, public.fx_rates, public.assets "
-        "to orbix_worker"
+        "grant select, insert, update on public.prices, public.fx_rates, public.assets to orbix_worker"
     )
     op.execute("grant select, insert, update on public.reports to orbix_worker")
 
@@ -65,9 +64,7 @@ def upgrade() -> None:
         """)
 
     # ── integridade: evento sempre pertence ao dono da carteira ────────
-    op.execute(
-        "alter table public.wallets add constraint wallets_id_user_id_key unique (id, user_id)"
-    )
+    op.execute("alter table public.wallets add constraint wallets_id_user_id_key unique (id, user_id)")
     op.execute("""
         alter table public.events
           add constraint events_wallet_owner_fkey

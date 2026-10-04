@@ -43,7 +43,18 @@
 
 	log {
 		output stdout
-		format json
+		# códigos de uso único do login e endereços de carteira não vão para o log
+		format filter {
+			wrap json
+			fields {
+				request>uri query {
+					delete code
+					delete state
+					delete address
+				}
+				request>headers>Authorization delete
+			}
+		}
 	}
 }
 

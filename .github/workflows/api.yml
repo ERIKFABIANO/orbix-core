@@ -29,8 +29,13 @@ jobs:
         run: uv run ruff check .
       - name: mypy
         run: uv run mypy src
+      - name: banco de teste (Postgres igual ao schema de produção)
+        run: uv run python scripts/testdb.py up
       - name: pytest
-        run: uv run pytest -q
+        run: |
+          uv run pytest -q -rs | tee /tmp/pytest.txt
+          # sem o banco, os testes de integração seriam pulados em silêncio: falhar nesse caso
+          ! grep -q "banco de teste fora do ar" /tmp/pytest.txt
       - name: bandit
         run: uv run bandit -q -r src
       - name: pip-audit
@@ -58,4 +63,103 @@ jobs:
       - name: segredo não pode estar na imagem
         run: |
           ! docker run --rm --entrypoint sh orbix-api:${{ github.sha }} -c 'ls -a /app' | grep -E '^\.env'
-      # push para o registry e deploy entram quando o registry e o domínio existirem
+      - name: salvar imagem para o deploy
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: docker save -o /tmp/orbix-api.tar orbix-api:${{ github.sha }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        with:
+          name: orbix-api-image
+          path: /tmp/orbix-api.tar
+          retention-days: 1
+
+  # Deploy manual: .\scripts\deploy\deploy.ps1 (precisa do .env e da chave pessoal na máquina
+  # do Erik). Este job é a mesma coisa rodando no GitHub, sem depender de máquina nenhuma: os
+  # segredos ficam só nas Actions secrets do repositório, com uma chave SSH própria do CI
+  # (orbix-ci-deploy, separada da pessoal) e o firewall da droplet libera o runner só durante
+  # a execução. Migração de banco continua manual, de propósito: `uv run alembic upgrade head`
+  # antes de mesclar pra main.
+  deploy:
+    needs: image
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    concurrency: orbix-deploy
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: "0.12.21"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: orbix-api-image
+          path: /tmp
+      - uses: digitalocean/action-doctl@3bf9b3528e82cf224f1c1c0a9f9fdef0cae60c7a # v2.6.0
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+      - name: montar .env de produção a partir dos segredos (só em memória, apagado no final)
+        run: |
+          umask 077
+          cat > .env <<EOF
+          SUPABASE_PROJECT_REF=${{ secrets.SUPABASE_PROJECT_REF }}
+          DATABASE_URL=${{ secrets.DATABASE_URL }}
+          WORKER_DATABASE_URL=${{ secrets.WORKER_DATABASE_URL }}
+          RESEND_API_KEY=${{ secrets.RESEND_API_KEY }}
+          EMAIL_FROM=${{ secrets.EMAIL_FROM }}
+          GOOGLE_CLIENT_ID=${{ secrets.OAUTH_GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET=${{ secrets.OAUTH_GOOGLE_CLIENT_SECRET }}
+          GITHUB_CLIENT_ID=${{ secrets.OAUTH_GITHUB_CLIENT_ID }}
+          GITHUB_CLIENT_SECRET=${{ secrets.OAUTH_GITHUB_CLIENT_SECRET }}
+          OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
+          LLM_MODEL_AGENT=${{ secrets.LLM_MODEL_AGENT }}
+          R2_ENDPOINT=${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET=${{ secrets.R2_BUCKET }}
+          UNKNOWN_COST_POLICY=${{ secrets.UNKNOWN_COST_POLICY }}
+          HELIUS_API_KEY=${{ secrets.HELIUS_API_KEY }}
+          COINGECKO_API_KEY=${{ secrets.COINGECKO_API_KEY }}
+          SOLANA_MEMO_RPC_URL=${{ secrets.SOLANA_MEMO_RPC_URL }}
+          SOLANA_MEMO_CLUSTER=${{ secrets.SOLANA_MEMO_CLUSTER }}
+          SOLANA_MEMO_SECRET_KEY=${{ secrets.SOLANA_MEMO_SECRET_KEY }}
+          EOF
+      - name: empacotar os três .env de produção
+        run: |
+          mkdir -p stage
+          uv run python scripts/deploy/make_prod_env.py stage orbix-api:${{ github.sha }}
+          cp infra/docker-compose.yml infra/Caddyfile scripts/deploy/merge_env.py scripts/deploy/remote.sh stage/
+          cp /tmp/orbix-api.tar stage/
+      - name: liberar este runner no firewall da droplet
+        run: |
+          MYIP=$(curl -s https://api.ipify.org)
+          FW=$(doctl compute firewall list --format ID --no-header | head -1)
+          echo "FW=$FW" >> "$GITHUB_ENV"
+          echo "MYIP=$MYIP" >> "$GITHUB_ENV"
+          doctl compute firewall add-rules "$FW" --inbound-rules "protocol:tcp,ports:22,address:${MYIP}/32"
+      - name: preparar a chave do CI
+        run: |
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s' "${{ secrets.CI_DEPLOY_SSH_KEY }}" > ~/.ssh/ci_deploy
+          chmod 600 ~/.ssh/ci_deploy
+          printf '%s\n' "${{ secrets.DROPLET_SSH_HOST_KEY }}" > ~/.ssh/known_hosts
+      - name: enviar e aplicar na droplet
+        run: |
+          target="erik@${{ secrets.DROPLET_HOST }}"
+          ssh -i ~/.ssh/ci_deploy "$target" "mkdir -p /opt/orbix/incoming; chmod 700 /opt/orbix/incoming"
+          scp -i ~/.ssh/ci_deploy stage/* "$target:/opt/orbix/incoming/"
+          ssh -i ~/.ssh/ci_deploy "$target" "cp /opt/orbix/incoming/remote.sh /tmp/orbix-remote.sh; bash /tmp/orbix-remote.sh; rm -f /tmp/orbix-remote.sh"
+      - name: limpar segredos do runner
+        if: always()
+        run: rm -rf .env stage ~/.ssh/ci_deploy
+      - name: revogar o acesso do runner no firewall
+        if: always()
+        run: |
+          if [ -n "${FW:-}" ] && [ -n "${MYIP:-}" ]; then
+            doctl compute firewall remove-rules "$FW" --inbound-rules "protocol:tcp,ports:22,address:${MYIP}/32" || true
+          fi

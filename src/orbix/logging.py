@@ -9,6 +9,8 @@ import structlog
 _SOLANA = re.compile(r"\b[1-9A-HJ-NP-Za-km-z]{32,44}\b")
 _EVM = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 _SENSITIVE_KEYS = {"authorization", "token", "api_key", "secret", "password", "cookie"}
+# chave que viaja na query string (Helius) e pode aparecer em texto de exceção
+_KEY_IN_URL = re.compile(r"(api[-_]?key=)[^&\s'\"]+", re.IGNORECASE)
 
 
 def mask_address(value: str) -> str:
@@ -20,6 +22,7 @@ def _scrub(_: Any, __: str, event: MutableMapping[str, Any]) -> MutableMapping[s
         if any(s in key.lower() for s in _SENSITIVE_KEYS):
             event[key] = "[removido]"
         elif isinstance(value, str):
+            value = _KEY_IN_URL.sub(r"\1[removido]", value)
             value = _EVM.sub(lambda m: mask_address(m.group()), value)
             event[key] = _SOLANA.sub(lambda m: mask_address(m.group()), value)
     return event
@@ -27,14 +30,17 @@ def _scrub(_: Any, __: str, event: MutableMapping[str, Any]) -> MutableMapping[s
 
 def configure_logging(json_logs: bool) -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    renderer: Any = (
-        structlog.processors.JSONRenderer() if json_logs else structlog.dev.ConsoleRenderer()
-    )
+    # estas bibliotecas logam a URL completa de cada requisição, com chave na query string
+    for noisy in ("httpx", "httpcore", "botocore", "boto3", "urllib3", "openai"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    renderer: Any = structlog.processors.JSONRenderer() if json_logs else structlog.dev.ConsoleRenderer()
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            # vira texto antes do filtro, para o traceback também ser mascarado
+            structlog.processors.format_exc_info,
             _scrub,
             renderer,
         ],

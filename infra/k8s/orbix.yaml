@@ -1,0 +1,172 @@
+# Orbix Declare no Kubernetes (k3s ou DOKS). Aplicar com: kubectl apply -k infra/k8s
+# Os segredos NÃO ficam neste arquivo: ver infra/k8s/README.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: orbix
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+# ── Redis: fila, rate limit e códigos de login. Só a API e o worker alcançam ──
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: redis-data, namespace: orbix }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: 1Gi } }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: redis, namespace: orbix, labels: { app: redis } }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 999, fsGroup: 999, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          args: ["redis-server", "--requirepass", "$(REDIS_PASSWORD)", "--maxmemory", "96mb",
+                 "--maxmemory-policy", "noeviction", "--appendonly", "yes"]
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom: { secretKeyRef: { name: orbix-redis, key: REDIS_PASSWORD } }
+          ports: [{ containerPort: 6379 }]
+          resources: { requests: { memory: 32Mi, cpu: 20m }, limits: { memory: 128Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe: { tcpSocket: { port: 6379 }, periodSeconds: 10 }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: redis-data }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redis, namespace: orbix }
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379, targetPort: 6379 }]
+---
+# ── API ──
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api, namespace: orbix, labels: { app: api } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: api } }
+  template:
+    metadata: { labels: { app: api } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: api
+          image: orbix-api   # o kustomize troca pela tag do deploy
+          envFrom: [{ secretRef: { name: orbix-api } }]   # sem a chave de memo e sem a da Helius
+          ports: [{ containerPort: 8000 }]
+          resources: { requests: { memory: 128Mi, cpu: 50m }, limits: { memory: 320Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+          readinessProbe:
+            httpGet: { path: /health, port: 8000, httpHeaders: [{ name: Host, value: 127.0.0.1 }] }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8000, httpHeaders: [{ name: Host, value: 127.0.0.1 }] }
+            periodSeconds: 30
+      volumes: [{ name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api, namespace: orbix }
+spec:
+  selector: { app: api }
+  ports: [{ port: 80, targetPort: 8000 }]
+---
+# ── Worker: único pod com a chave da carteira de memo ──
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: worker, namespace: orbix, labels: { app: worker } }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector: { matchLabels: { app: worker } }
+  template:
+    metadata: { labels: { app: worker } }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: orbix-api
+          command: ["arq", "orbix.worker.WorkerSettings"]
+          envFrom: [{ secretRef: { name: orbix-worker } }]
+          resources: { requests: { memory: 96Mi, cpu: 50m }, limits: { memory: 320Mi } }
+          securityContext: { allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: tmp, mountPath: /tmp }]
+      volumes: [{ name: tmp, emptyDir: { medium: Memory, sizeLimit: 32Mi } }]
+---
+# ── Entrada: TLS com o certificado de origem da Cloudflare ──
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  namespace: orbix
+spec:
+  tls: [{ hosts: [api-declare.orbixlab.com.br], secretName: orbix-origin-tls }]
+  rules:
+    - host: api-declare.orbixlab.com.br
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: api, port: { number: 80 } } }
+---
+# ── Rede: tudo negado por padrão; só o necessário é liberado ──
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: default-deny, namespace: orbix }
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: redis-only-from-app, namespace: orbix }
+spec:
+  podSelector: { matchLabels: { app: redis } }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: { matchExpressions: [{ key: app, operator: In, values: [api, worker] }] }
+      ports: [{ port: 6379 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: api-ingress, namespace: orbix }
+spec:
+  podSelector: { matchLabels: { app: api } }
+  policyTypes: [Ingress]
+  ingress:
+    # o controlador de entrada (Traefik no k3s) fica em kube-system
+    - from: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } } }]
+      ports: [{ port: 8000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: app-egress, namespace: orbix }
+spec:
+  podSelector: { matchExpressions: [{ key: app, operator: In, values: [api, worker] }] }
+  policyTypes: [Egress]
+  egress:
+    - to: [{ podSelector: { matchLabels: { app: redis } } }]
+      ports: [{ port: 6379 }]
+    # DNS do cluster
+    - to: [{ namespaceSelector: {} }]
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    # internet: Supabase (5432/6543) e APIs externas (443). Nada para a rede interna do cluster.
+    - to: [{ ipBlock: { cidr: 0.0.0.0/0, except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16] } }]
+      ports: [{ port: 443 }, { port: 5432 }, { port: 6543 }]

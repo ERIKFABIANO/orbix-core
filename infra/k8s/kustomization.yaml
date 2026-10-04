@@ -1,0 +1,10 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - orbix.yaml
+images:
+  # trocar pela imagem publicada no registry a cada deploy:
+  #   kustomize edit set image orbix-api=registry.digitalocean.com/<registry>/orbix-api:<tag>
+  - name: orbix-api
+    newName: orbix-api
+    newTag: latest
