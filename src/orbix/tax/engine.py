@@ -89,6 +89,14 @@ class Row:
     cost_manual: bool = False
     # quantos fills da corretora formam esta linha (uma ordem pode executar em vários)
     fills: int = 1
+    # o outro lado da troca: o que entrou na carteira
+    quantity_in: Decimal | None = None
+    quantity_in_asset: str | None = None
+    # de onde veio o custo: posição do ativo antes da venda e custo médio por unidade usado
+    position_before_qty: Decimal | None = None
+    avg_cost_unit: Decimal | None = None
+    # valor por unidade antes de arredondar a linha para centavos
+    unit_price: Decimal | None = None
 
     @property
     def priced(self) -> bool:
@@ -270,6 +278,8 @@ def _round_row(row: Row) -> None:
     linhas e o arquivo exportado fecha sem diferença de centavo."""
     if row.value is None:
         return
+    # antes de arredondar: valor em centavos dividido por quantidade pequena distorce o preço
+    row.unit_price = row.value / row.quantity if row.quantity else None
     row.value = _to_cents(row.value)
     if row.type == "perp" and not row.reportable:
         row.cost = _to_cents(row.cost)
@@ -291,6 +301,8 @@ def _swap_row(
 
     cost = ZERO
     cost_unknown = False
+    single_out = len({_key(e) for e in outs}) == 1
+    position_before = max(state.positions[_key(outs[0])].qty, ZERO) if single_out else None
     for leg in outs:
         position = state.positions[_key(leg)]
         covered = min(leg.qty, max(position.qty, ZERO))
@@ -313,6 +325,8 @@ def _swap_row(
     if first.cost_override is not None:
         cost, cost_unknown = first.cost_override, False
     ptax = next((e.ptax for e in (*outs, *ins) if e.ptax is not None), None)
+    sold = _total_qty(outs)
+    single_in = len({_key(e) for e in ins}) == 1
     return Row(
         id=first.id,
         ts=first.ts,
@@ -339,6 +353,10 @@ def _swap_row(
         price_ts=first.price_ts,
         ptax_date=next((e.ptax_date for e in (*outs, *ins) if e.ptax_date is not None), None),
         fills=len(outs),
+        quantity_in=_total_qty(ins) if single_in else None,
+        quantity_in_asset=ins[0].symbol if single_in else None,
+        position_before_qty=position_before,
+        avg_cost_unit=cost / sold if single_out and value is not None and sold else None,
     )
 
 

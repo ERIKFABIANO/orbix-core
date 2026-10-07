@@ -368,7 +368,12 @@ O rascunho termina na linha `total`; a linha `rascunho,sim` saiu (quem marca o p
 verificacao,7f3c…(64 caracteres hex),,,,,,,,,,,
 ```
 
-`TaxEvent` ganhou `fillCount`: quantos fills da corretora formam o evento.
+`TaxEvent` ganhou, em 07/10:
+
+- `fillCount`: quantos fills da corretora formam o evento.
+- `quantityIn` e `quantityInAsset`: o outro lado da troca (o que entrou). `null` fora de swap.
+- `positionBeforeQty` e `avgCostUnitBrl`: posição do ativo antes da venda e custo médio por unidade usado. `costBrl` = `quantity` × `avgCostUnitBrl`.
+- `unitPriceBrl` passou a sair do valor antes do arredondamento para centavos (funding em USDC = PTAX da linha).
 
 É um código aleatório que impede alguém de descobrir os valores do relatório testando combinações contra o hash público. A página `/v/[id]` não muda: ela calcula o SHA-256 do arquivo inteiro, e essa linha faz parte do arquivo.
 

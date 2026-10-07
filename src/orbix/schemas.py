@@ -225,6 +225,12 @@ class TaxEventOut(Out):
     gain_brl: float | None = None
     # quantos fills da corretora formam o evento (uma ordem pode executar em vários)
     fill_count: int = 1
+    # o outro lado da troca (null fora de swap, ou em rota com mais de um ativo de entrada)
+    quantity_in: float | None = None
+    quantity_in_asset: str | None = None
+    # origem do custo: posição do ativo antes da venda e custo médio por unidade usado
+    position_before_qty: float | None = None
+    avg_cost_unit_brl: float | None = None
     pending_reasons: list[str] = []
     review_history: list[EventReviewOut] = []
 

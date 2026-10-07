@@ -142,7 +142,7 @@ def _money_or_none(value: Decimal | None) -> float | None:
 
 
 def to_tax_event(row: Row, history: list[EventReviewOut] | None = None) -> TaxEventOut:
-    unit = row.value / row.quantity if row.value is not None and row.quantity else None
+    unit = row.unit_price
     return TaxEventOut(
         id=row.id,
         date=row.ts,
@@ -167,6 +167,12 @@ def to_tax_event(row: Row, history: list[EventReviewOut] | None = None) -> TaxEv
         cost_brl=money(row.cost) if row.priced and row.reportable else None,
         gain_brl=money(row.gain) if row.priced and row.reportable else None,
         fill_count=row.fills,
+        quantity_in=float(row.quantity_in) if row.quantity_in is not None else None,
+        quantity_in_asset=row.quantity_in_asset,
+        position_before_qty=float(row.position_before_qty) if row.position_before_qty is not None else None,
+        avg_cost_unit_brl=float(row.avg_cost_unit.quantize(Decimal("0.00000001")))
+        if row.avg_cost_unit is not None
+        else None,
         pending_reasons=pending_reasons(row),
         review_history=history or [],
     )
