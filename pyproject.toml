@@ -70,5 +70,5 @@ dev = [
     "respx>=0.23.1",
     "ruff>=0.16.9",
     "sqlalchemy[asyncio]>=2.1.1",
-    "types-boto3>=1.43.106",
+    "types-boto3>=1.43.108",
 ]
