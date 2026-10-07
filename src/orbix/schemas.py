@@ -223,6 +223,8 @@ class TaxEventOut(Out):
     fees_brl: float | None = None
     cost_brl: float | None = None
     gain_brl: float | None = None
+    # quantos fills da corretora formam o evento (uma ordem pode executar em vários)
+    fill_count: int = 1
     pending_reasons: list[str] = []
     review_history: list[EventReviewOut] = []
 

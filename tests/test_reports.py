@@ -153,10 +153,27 @@ async def test_draft_csv_is_embedded_and_marked(
     prefix = "data:text/csv;charset=utf-8;base64,"
     assert link["url"].startswith(prefix)
     lines = base64.b64decode(link["url"][len(prefix) :]).decode().splitlines()
-    assert lines[0] == "data,tipo,ativo,quantidade,ptax,valor_brl,custo_brl,ganho_brl,preco_manual"
-    assert lines[2] == "2026-09-20,swap,SOL → USDC,4.00000000,5.2000,4000.00,2000.00,2000.00,nao"
-    assert lines[-2] == "total,,,,,9000.00,7000.00,2000.00,"
-    assert lines[-1] == "rascunho,sim,,,,,,,"
+    assert lines[0] == (
+        "data,tipo,ativo,quantidade,ptax,valor_brl,custo_brl,ganho_brl,preco_manual,"
+        "taxas_brl,custo_desconhecido,rede,carteira"
+    )
+    sale = lines[2].split(",")
+    assert sale[:9] == [
+        "2026-09-20",
+        "swap",
+        "SOL → USDC",
+        "4.00000000",
+        "5.2000",
+        "4000.00",
+        "2000.00",
+        "2000.00",
+        "nao",
+    ]
+    # cada linha diz se o custo é desconhecido e de qual rede e carteira ela veio
+    assert sale[10:12] == ["nao", "solana"] and "…" in sale[12]
+    # o rascunho termina no total: quem marca o arquivo como provisório é o nome dele
+    assert lines[-1] == "total,,,,,9000.00,7000.00,2000.00,,,,,"
+    assert all(len(line.split(",")) == 13 for line in lines)
     assert storage.objects == {}  # rascunho não é guardado
 
 

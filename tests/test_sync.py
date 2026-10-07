@@ -228,6 +228,77 @@ async def test_hyperliquid_unnamed_spot_pair_gets_a_real_symbol(
 
 
 @respx.mock
+async def test_resync_repairs_events_stored_before_the_order_grouping(
+    client: httpx.AsyncClient, admin: asyncpg.Connection, worker_db: Database, http_out: httpx.AsyncClient
+) -> None:
+    """Carteira lida antes da correção: fill de hash zerado gravado com a chave antiga e
+    eventos sem a ordem no `raw`. Depois da migração 0006 (apaga os de hash zerado e zera o
+    cursor), a releitura regrava tudo certo sem perder o preço que já estava no evento."""
+    headers, _, _, _ = await _login(client, admin)
+    added = (
+        await client.post(
+            "/api/wallets", json={"network": "hyperliquid", "address": "0x" + "c" * 40}, headers=headers
+        )
+    ).json()
+    wallet_id = UUID(added["id"])
+    zero = "0x" + "0" * 64
+    base = {"px": "1", "side": "A", "dir": "Sell", "closedPnl": "0", "fee": "0", "feeToken": "USDC"}
+    fills = [
+        {**base, "coin": "@230", "sz": "50", "time": TS * 1000, "hash": "0x" + "9" * 64, "oid": 5, "tid": 11},
+        {**base, "coin": "@230", "sz": "7", "time": TS * 1000 + 5, "hash": zero, "oid": 5, "tid": 12},
+    ]
+    spot_meta = {
+        "tokens": [{"name": "USDC", "index": 0}, {"name": "USDH", "index": 360}],
+        "universe": [{"name": "@230", "index": 230, "tokens": [360, 0]}],
+    }
+
+    def info(request: httpx.Request) -> httpx.Response:
+        body = __import__("json").loads(request.content)
+        if body["type"] == "userFillsByTime":
+            return httpx.Response(200, json=[f for f in fills if f["time"] >= body["startTime"]])
+        if body["type"] == "spotMeta":
+            return httpx.Response(200, json=spot_meta)
+        return httpx.Response(200, json=[])
+
+    respx.post("https://api.hyperliquid.xyz/info").mock(side_effect=info)
+    await sync_wallet(worker_db, sources(http_out, None), wallet_id)
+
+    # deixa o banco como ele estava antes da correção
+    await admin.execute(
+        """
+        insert into public.events (wallet_id, user_id, chain, tx_hash, event_index, ts, kind, asset, qty, raw)
+        select wallet_id, user_id, chain, $2, event_index, ts, kind, asset, qty, raw
+          from public.events where wallet_id = $1 and tx_hash like 'hl:%'
+        """,
+        wallet_id,
+        zero,
+    )
+    await admin.execute("delete from public.events where wallet_id = $1 and tx_hash like 'hl:%'", wallet_id)
+    await admin.execute(
+        "update public.events set raw = raw - 'oid' - 'coin' - 'tid', brl_value = 123 where wallet_id = $1",
+        wallet_id,
+    )
+    # o que a migração 0006 faz
+    await admin.execute("delete from public.events where chain = 'hyperliquid' and tx_hash = $1", zero)
+    await admin.execute("update public.wallets set sync_cursor = null where chain = 'hyperliquid'")
+
+    await sync_wallet(worker_db, sources(http_out, None), wallet_id)
+    rows = await admin.fetch(
+        "select tx_hash, raw, brl_value from public.events where wallet_id = $1 order by ts, event_index",
+        wallet_id,
+    )
+    assert len(rows) == 4  # dois fills, saída e entrada de cada um, sem duplicar
+    assert {r["tx_hash"] for r in rows} == {"0x" + "9" * 64, "hl:@230:5"}
+    assert all(r["raw"]["oid"] == 5 and r["raw"]["coin"] == "@230" for r in rows)
+    # o evento que já existia só ganhou a ordem no raw; o valor em reais ficou como estava
+    assert [r["brl_value"] for r in rows if r["tx_hash"].startswith("0x")] == [Decimal(123), Decimal(123)]
+    # USDH é dólar: resolvido o nome, o par passa a contar como stablecoin (B10)
+    assert await admin.fetchval(
+        "select is_stable from public.assets where chain = 'hyperliquid' and asset = '@230'"
+    )
+
+
+@respx.mock
 async def test_pricing_fills_brl_values_and_finishes_onboarding(
     client: httpx.AsyncClient, admin: asyncpg.Connection, worker_db: Database, http_out: httpx.AsyncClient
 ) -> None:

@@ -1,11 +1,14 @@
+import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from itertools import count
+from pathlib import Path
 from typing import Any
 
 from hypothesis import given
 from hypothesis import strategies as st
 
+from orbix.ingest.hyperliquid import normalize_fill
 from orbix.tax.engine import Event, compute_rows, money, month_of, summarize
 
 LIMIT, RATE = Decimal("35000"), Decimal("0.15")
@@ -310,3 +313,110 @@ def test_partial_sale_cost_stays_between_zero_and_total(
     events += swap(("SOL", str(sold), "1000"), ("USDC", "200", "1000"), ts=T0 + timedelta(days=1))
     row = compute_rows(events)[-1]
     assert Decimal(0) <= row.cost <= total_cost + Decimal("0.000001")
+
+
+# ── fills reais de uma carteira pública da Hyperliquid (relatório de testes de 06/10) ──
+
+SPOT_NAMES = {"@107": "HYPE", "@142": "UBTC", "@151": "UETH", "USDC": "USDC"}
+
+
+def _real_events() -> list[Event]:
+    fills = json.loads((Path(__file__).parent / "data" / "hyperliquid_fills_sample.json").read_text("utf-8"))
+    events = []
+    for fill in sorted(fills, key=lambda f: f["time"]):
+        for draft in normalize_fill(fill):
+            events.append(
+                Event(
+                    id=f"r{next(_ids)}",
+                    wallet_id="hl",
+                    chain="hyperliquid",
+                    tx_hash=draft.tx_hash,
+                    ts=draft.ts,
+                    kind=draft.kind,
+                    asset=draft.asset,
+                    qty=draft.qty,
+                    brl_value=draft.qty * (draft.usd_price or Decimal(0)) * 5,
+                    ptax=Decimal(5),
+                    policy="hyperliquid_fill",
+                    raw=draft.raw,
+                    symbol=SPOT_NAMES.get(draft.asset, draft.asset),
+                    stable=draft.asset == "USDC",
+                )
+            )
+    return events
+
+
+def test_real_wallet_one_row_per_order_and_no_mixed_assets() -> None:
+    rows = compute_rows(_real_events())
+    swaps = [r for r in rows if r.type == "swap"]
+    # nenhum evento mistura ativos (B7): um ativo de cada lado, sempre
+    assert all(" + " not in r.asset for r in swaps)
+    # uma linha por ordem, não por fill (B8): 51 fills spot, 14 ordens
+    assert len(swaps) == 14 and sum(r.fills for r in swaps) == 51
+    # a ordem de 24/05 que vendeu HYPE em 10 fills (5 com hash zerado) é uma linha só
+    sale = next(r for r in swaps if r.asset == "HYPE → USDC" and r.fills == 10)
+    assert sale.quantity == Decimal("187.14") and sale.tx_hash.startswith("0x")
+    # venda de UBTC de 03/06: 0,00793 + 0,00449 da mesma ordem (B6)
+    ubtc = next(r for r in swaps if r.asset == "UBTC → USDC" and r.fills == 2)
+    assert ubtc.quantity == Decimal("0.01242")
+    # custo proporcional: 0,01242 dos 0,01243 comprados a US$ 76.819 (PTAX 5 no teste)
+    bought = Decimal("0.01243") * Decimal("76819") * 5
+    assert abs(ubtc.cost - bought * Decimal("0.01242") / Decimal("0.01243")) < Decimal("0.01")
+    assert ubtc.gain < 0  # perda real: comprou a 76.819 e vendeu a 63.069
+    perps = [r for r in rows if r.type == "perp" and r.reportable]
+    assert len(perps) == 3
+
+
+def test_fee_counted_once_and_converted_when_charged_in_the_bought_asset() -> None:
+    rows = [r for r in compute_rows(_real_events()) if r.type == "swap"]
+    # venda de 15 HYPE em 01/05: taxa de 0,198288 USDC (uma vez, não uma por perna)
+    sale = next(r for r in rows if r.asset == "HYPE → USDC" and r.quantity == Decimal("15.0"))
+    assert sale.fees == Decimal("0.198288") * 5
+    # compra de 10 HYPE em 30/04 a US$ 39,381: taxa de 0,00326399 HYPE vale 0,1285 dólar
+    buy = next(r for r in rows if r.asset == "USDC → HYPE" and r.value == Decimal("1969.05"))
+    assert buy.fees == Decimal("0.00326399") * Decimal("39.381") * 5
+
+
+def test_unlisted_stablecoin_sold_without_history_has_no_gain() -> None:
+    """USDH vendida sem compra no histórico (veio por transferência): é dólar, o custo é o
+    próprio valor. Antes saía custo zero e o valor inteiro virava ganho (B10)."""
+    hl = {"chain": "hyperliquid"}
+    tx = "0xusdh"
+    out = ev("swap_out", "@230", "1690.18", "8559.24", tx=tx, **hl)
+    into = ev("swap_in", "USDC", "1690.18", "8559.24", tx=tx, **hl)
+    stable_out = Event(**{**out.__dict__, "stable": True, "symbol": "USDH"})
+    (row,) = compute_rows([stable_out, into])
+    assert (row.cost, row.gain, row.cost_unknown) == (Decimal("8559.24"), Decimal("0.00"), False)
+    # token comum na mesma situação continua com custo zero, mas marcado para revisão
+    (unknown,) = compute_rows([out, into])
+    assert (unknown.cost, unknown.cost_unknown) == (Decimal("0"), True)
+
+
+def test_order_filled_across_two_days_stays_in_each_day() -> None:
+    hl = {"chain": "hyperliquid"}
+    raw = {"oid": 77, "coin": "@107"}
+    late = datetime(2026, 5, 31, 23, 0, tzinfo=UTC)  # 20h de 31/05 em Brasília
+    after = datetime(2026, 6, 1, 4, 0, tzinfo=UTC)  # 01h de 01/06 em Brasília
+    events = [
+        ev("swap_out", "USDC", "100", "500", tx="0xa1", ts=late, raw=raw, **hl),
+        ev("swap_in", "@107", "2", "500", tx="0xa1", ts=late, raw=raw, **hl),
+        ev("swap_out", "USDC", "100", "500", tx="0xa2", ts=after, raw=raw, **hl),
+        ev("swap_in", "@107", "2", "500", tx="0xa2", ts=after, raw=raw, **hl),
+    ]
+    assert [r.month for r in compute_rows(events)] == ["2026-05", "2026-06"]
+
+
+def test_month_total_is_the_exact_sum_of_the_rounded_rows() -> None:
+    events = [
+        *swap(("USDC", "3", "10"), ("SOL", "3", "10")),
+        *[
+            e
+            for _ in range(3)
+            for e in swap(("SOL", "1", "5.005"), ("USDC", "1", "5.005"), ts=T0 + timedelta(days=1))
+        ],
+    ]
+    rows = [r for r in compute_rows(events) if r.type == "swap"]
+    totals = summarize(rows, LIMIT, RATE)
+    assert all(r.gain == (r.value or 0) - r.cost for r in rows)
+    assert totals.disposed == sum(Decimal(str(money(r.value))) for r in rows)
+    assert totals.gain == sum(Decimal(str(money(r.gain))) for r in rows)

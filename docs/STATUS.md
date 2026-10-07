@@ -108,6 +108,10 @@ Estão em `src/orbix/tax/engine.py`. São estimativa, não orientação fiscal. 
 | Transferência entre carteiras do mesmo usuário | Ignorada: o custo de aquisição é preservado |
 | Venda sem aquisição conhecida | Custo zero (custo não comprovado) e a linha vem marcada com `costUnknown`. Stablecoin entra pelo próprio valor. O usuário pode informar o custo (`PUT /api/events/:id/cost`, com motivo e evidência); a linha passa a `costManual`. `UNKNOWN_COST_POLICY=market` troca o custo zero pelo valor da venda |
 | Perpétuos | Ganho = resultado realizado menos taxas, convertido pela PTAX |
+| Ordem da Hyperliquid em vários fills | Uma linha por ordem (`oid`) e par, por dia de Brasília. Nunca agrupa só pelo hash: a Hyperliquid zera o hash de parte dos fills |
+| Stablecoin na Hyperliquid | USDC, USDH, USDT0 e USDE valem pelo próprio valor quando vendidas sem compra no histórico |
+| Arredondamento | Valor e custo de cada linha em centavos; ganho = valor − custo. O total do mês é a soma exata das linhas |
+| Taxa | Informativa (`feesBrl` e coluna `taxas_brl` do CSV). Não entra no custo até o contador definir |
 | Funding | Recebido é ganho; pago é custo |
 | Isenção | Total alienado em spot no mês até R$ 35.000: ganho em spot isento. Perpétuos e funding não entram na isenção |
 | Alíquota | 15% sobre o ganho tributável. Faixas progressivas acima de R$ 5 milhões não estão implementadas |

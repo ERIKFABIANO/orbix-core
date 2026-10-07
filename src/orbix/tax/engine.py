@@ -87,6 +87,8 @@ class Row:
     ptax_date: date | None = None
     # custo de aquisição informado pelo usuário em vez do calculado
     cost_manual: bool = False
+    # quantos fills da corretora formam esta linha (uma ordem pode executar em vários)
+    fills: int = 1
 
     @property
     def priced(self) -> bool:
@@ -185,23 +187,95 @@ def _protocol(event: Event) -> str | None:
     return source.replace("_", " ").title()
 
 
-def _leg_fees_brl(legs: list[Event]) -> Decimal | None:
+# dólares usados como moeda de cotação na Hyperliquid: a taxa cobrada neles já está em dólar
+_USD_FEE_TOKENS = frozenset({"USDC", "USDH", "USDT0", "USDE"})
+
+
+def _leg_fees_brl(outs: list[Event]) -> Decimal | None:
     """Taxa de cada fill quando vem no próprio evento (a Hyperliquid manda `fee`/`feeToken`
-    em cada fill, em vez de um evento de taxa à parte) e é em USDC — dá pra converter direto
-    pela PTAX da linha. Taxa paga no próprio ativo negociado (comum em spot) fica sem
-    conversão por enquanto: precisaria do preço desse ativo no instante, que esta função não
-    tem (relatório de testes de 06/10, B4; `UNKNOWN_COST_POLICY` não se aplica aqui)."""
+    em cada fill, em vez de um evento de taxa à parte).
+
+    Recebe só as pernas de saída: cada fill gera uma saída e uma entrada com o mesmo `raw`,
+    e somar as duas contaria a taxa em dobro. Taxa em dólar converte direto pela PTAX; taxa
+    cobrada no ativo comprado (o normal numa compra spot) usa o preço do próprio fill."""
     total = ZERO
     found = False
-    for leg in legs:
-        if str(leg.raw.get("feeToken") or "") != "USDC":
-            continue
+    for leg in outs:
         amount = leg.raw.get("fee")
         if amount is None or leg.ptax is None:
             continue
-        total += _decimal(amount) * leg.ptax
+        token = str(leg.raw.get("feeToken") or "")
+        if token in _USD_FEE_TOKENS:
+            usd = _decimal(amount)
+        elif leg.chain == "hyperliquid" and leg.raw.get("px") is not None:
+            usd = _decimal(amount) * _decimal(leg.raw.get("px"))
+        else:
+            continue
+        total += usd * leg.ptax
         found = True
     return total if found else None
+
+
+def _order_key(event: Event) -> str:
+    """Chave de agrupamento dentro da carteira.
+
+    Na Hyperliquid uma ordem executa em vários fills, cada um com o próprio hash (ou com o
+    hash zerado). Agrupar pelo hash separa a mesma ordem em várias linhas iguais e, no hash
+    zerado, junta pares que não têm relação. A ordem (oid) no par (coin) é a identidade
+    certa; o dia em Brasília entra na chave porque uma ordem limitada pode executar ao longo
+    de vários dias, com PTAX e mês diferentes."""
+    oid, coin = event.raw.get("oid"), event.raw.get("coin")
+    if event.chain == "hyperliquid" and oid and coin and event.kind in ("swap_in", "swap_out", "perp_fill"):
+        return f"hl:{coin}:{oid}:{event.ts.astimezone(BRT).date().isoformat()}"
+    return event.tx_hash
+
+
+def _is_real_hash(tx_hash: str) -> bool:
+    return not tx_hash.startswith("hl:") and set(tx_hash.removeprefix("0x")) != {"0"}
+
+
+def _display_hash(events: list[Event]) -> str:
+    """Hash que dá para abrir no explorador, quando algum fill do grupo tem um."""
+    return next((e.tx_hash for e in events if _is_real_hash(e.tx_hash)), events[0].tx_hash)
+
+
+def _merge_perp_rows(rows: list[Row]) -> list[Row]:
+    """Junta os fills de uma mesma ordem de perpétuo. Abertura e fechamento ficam em linhas
+    separadas: só o fechamento entra no relatório."""
+    merged: dict[bool, Row] = {}
+    for row in rows:
+        kept = merged.get(row.reportable)
+        if kept is None:
+            merged[row.reportable] = row
+            continue
+        kept.quantity += row.quantity
+        kept.value = None if kept.value is None or row.value is None else kept.value + row.value
+        kept.cost += row.cost
+        kept.gain += row.gain
+        kept.fees = None if kept.fees is None or row.fees is None else kept.fees + row.fees
+        kept.manual = kept.manual or row.manual
+        kept.fills += row.fills
+        if not _is_real_hash(kept.tx_hash) and _is_real_hash(row.tx_hash):
+            kept.tx_hash = row.tx_hash
+    return list(merged.values())
+
+
+def _to_cents(value: Decimal) -> Decimal:
+    return value.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def _round_row(row: Row) -> None:
+    """Valor e custo em centavos, e o ganho como a diferença dos dois. A posição continua com
+    a precisão cheia; só a linha é arredondada. Assim o total do mês é a soma exata das
+    linhas e o arquivo exportado fecha sem diferença de centavo."""
+    if row.value is None:
+        return
+    row.value = _to_cents(row.value)
+    if row.type == "perp" and not row.reportable:
+        row.cost = _to_cents(row.cost)
+        return
+    row.cost = _to_cents(row.cost)
+    row.gain = row.value - row.cost
 
 
 def _swap_row(
@@ -247,7 +321,7 @@ def _swap_row(
         asset=f"{_label(outs)} → {_label(ins)}",
         quantity=_total_qty(outs),
         quantity_asset=first.symbol,
-        tx_hash=first.tx_hash,
+        tx_hash=_display_hash(outs),
         wallet_address=first.wallet_address,
         value=value,
         cost=cost if value is not None else ZERO,
@@ -264,6 +338,7 @@ def _swap_row(
         policy=(first if out_total is not None else ins[0]).policy,
         price_ts=first.price_ts,
         ptax_date=next((e.ptax_date for e in (*outs, *ins) if e.ptax_date is not None), None),
+        fills=len(outs),
     )
 
 
@@ -369,7 +444,7 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
 
     groups: dict[tuple[str, str], list[Event]] = {}
     for event in events:
-        groups.setdefault((event.wallet_id, event.tx_hash), []).append(event)
+        groups.setdefault((event.wallet_id, _order_key(event)), []).append(event)
 
     state = _State()
     rows: list[Row] = []
@@ -381,9 +456,10 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
             fees = (
                 sum((e.brl_value or ZERO for e in fee_events), ZERO)
                 if fee_events and all(e.brl_value is not None for e in fee_events)
-                else _leg_fees_brl(outs + ins)
+                else _leg_fees_brl(outs)
             )
             rows.append(_swap_row(state, outs, ins, unknown_cost, fees))
+        perp_rows: list[Row] = []
         for event in group:
             if event.kind in ("swap_in", "swap_out") and outs and ins:
                 continue
@@ -397,10 +473,13 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
             elif event.kind in ("transfer_out", "fee", "swap_out"):
                 state.positions[_key(event)].remove(event.qty)
             elif event.kind == "perp_fill":
-                rows.append(_perp_row(state, event))
+                perp_rows.append(_perp_row(state, event))
             elif event.kind == "funding":
                 rows.append(_funding_row(event))
             # stake, unstake e other: o ativo continua do usuário, a posição não muda
+        rows.extend(_merge_perp_rows(perp_rows))
+    for row in rows:
+        _round_row(row)
     return rows
 
 

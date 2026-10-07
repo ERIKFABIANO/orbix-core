@@ -350,13 +350,25 @@ Erros novos nessas rotas:
 | 409 | `nothing_to_report` | O mês não tem nenhuma alienação |
 | 503 | `storage_unavailable` | Falha ao guardar o arquivo |
 
-### O CSV oficial tem uma linha a mais
+### O CSV oficial tem colunas e uma linha a mais
 
-O arquivo gerado pelo back-end segue o mesmo cabeçalho de `src/lib/report-file.ts`, com uma última linha depois do total:
+Cabeçalho do arquivo gerado pelo back-end (as quatro últimas colunas entraram em 07/10, sempre no fim):
 
 ```
-verificacao,7f3c…(64 caracteres hex),,,,,,,
+data,tipo,ativo,quantidade,ptax,valor_brl,custo_brl,ganho_brl,preco_manual,taxas_brl,custo_desconhecido,rede,carteira
 ```
+
+- `taxas_brl`: taxa da operação em reais, informativa. Vazia quando a fonte não informa.
+- `custo_desconhecido`: `sim` quando a compra não está no histórico lido (custo zero, ganho inflado até o usuário informar o custo).
+- `rede` e `carteira` (endereço encurtado): de onde veio cada linha.
+
+O rascunho termina na linha `total`; a linha `rascunho,sim` saiu (quem marca o provisório é o nome do arquivo). O relatório final tem uma última linha depois do total:
+
+```
+verificacao,7f3c…(64 caracteres hex),,,,,,,,,,,
+```
+
+`TaxEvent` ganhou `fillCount`: quantos fills da corretora formam o evento.
 
 É um código aleatório que impede alguém de descobrir os valores do relatório testando combinações contra o hash público. A página `/v/[id]` não muda: ela calcula o SHA-256 do arquivo inteiro, e essa linha faz parte do arquivo.
 

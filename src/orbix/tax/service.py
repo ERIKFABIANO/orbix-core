@@ -71,7 +71,7 @@ async def load_rows(conn: asyncpg.Connection) -> list[Row]:
             raw=r["raw"] or {},
             symbol=r["symbol"] or KNOWN_SYMBOLS.get(r["asset"]) or short(r["asset"]),
             wallet_address=r["address"],
-            stable=bool(r["is_stable"]) or is_stable(r["chain"], r["asset"]),
+            stable=bool(r["is_stable"]) or is_stable(r["chain"], r["asset"], r["symbol"]),
             wallet_label=r["label"],
             price_ts=r["price_ts"],
             ptax_date=r["ptax_date"],
@@ -166,6 +166,7 @@ def to_tax_event(row: Row, history: list[EventReviewOut] | None = None) -> TaxEv
         fees_brl=_money_or_none(row.fees),
         cost_brl=money(row.cost) if row.priced and row.reportable else None,
         gain_brl=money(row.gain) if row.priced and row.reportable else None,
+        fill_count=row.fills,
         pending_reasons=pending_reasons(row),
         review_history=history or [],
     )

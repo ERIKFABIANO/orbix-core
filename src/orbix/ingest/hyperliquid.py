@@ -59,14 +59,21 @@ def normalize_fill(fill: dict[str, Any]) -> list[EventDraft]:
     # único e estável dentro do grupo
     base_index = (int(tid) % 1_000_000_000) * 2 if isinstance(tid, int) else 0
     side = str(fill.get("side") or "")
-    raw = {
+    raw: dict[str, Any] = {
         "side": side,
         "dir": str(fill.get("dir") or "")[:30],
         "px": str(price),
         "closedPnl": str(_decimal(fill.get("closedPnl")) or Decimal(0)),
         "fee": str(_decimal(fill.get("fee")) or Decimal(0)),
         "feeToken": str(fill.get("feeToken") or USDC)[:20],
+        # par e ordem: o motor fiscal junta os fills da mesma ordem numa linha só
+        "coin": coin,
     }
+    oid = fill.get("oid")
+    if isinstance(oid, int) and oid > 0:
+        raw["oid"] = oid
+    if isinstance(tid, int) and tid > 0:
+        raw["tid"] = tid
 
     if not _is_spot(coin):
         return [

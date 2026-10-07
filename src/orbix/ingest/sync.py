@@ -37,7 +37,8 @@ insert into public.events
   (wallet_id, user_id, chain, tx_hash, event_index, ts, kind, asset, qty, raw, usd_price,
    pricing_policy)
 values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-on conflict (wallet_id, tx_hash, event_index) do nothing
+on conflict (wallet_id, tx_hash, event_index) do update set raw = excluded.raw
+  where public.events.raw is distinct from excluded.raw
 """
 
 
@@ -193,12 +194,18 @@ async def _fill_hyperliquid_symbols(db: Database, client: HyperliquidClient) -> 
     if not missing:
         return
     names = await client.spot_meta_names()
-    updates = [(asset, names[asset]) for asset in missing if asset in names]
+    updates = [
+        (asset, names[asset], is_stable("hyperliquid", asset, names[asset]))
+        for asset in missing
+        if asset in names
+    ]
     if not updates:
         return
     async with db.service() as conn:
         await conn.executemany(
-            "update public.assets set symbol = $2 where chain = 'hyperliquid' and asset = $1", updates
+            "update public.assets set symbol = $2, is_stable = is_stable or $3 "
+            "where chain = 'hyperliquid' and asset = $1",
+            updates,
         )
 
 

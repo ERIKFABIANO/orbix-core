@@ -50,8 +50,10 @@ def build_message(
 ) -> str:
     # Formato SIWS: as carteiras reconhecem e conferem o domínio contra o site aberto.
     page = front_origin(settings, origin)
+    # só ASCII: a gramática do Sign-In With Solana não prevê acento na frase, e carteira que
+    # segue a especificação à risca recusa a mensagem como mal formada
     statement = tr(
-        "Entrar no Orbix Declare. Esta assinatura não envia transações nem move fundos.",
+        "Entrar no Orbix Declare. Esta assinatura apenas confirma a posse da carteira e nunca move fundos.",
         "Sign in to Orbix Declare. This signature sends no transactions and moves no funds.",
     )
     return "\n".join(

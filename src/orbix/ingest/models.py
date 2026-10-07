@@ -38,8 +38,15 @@ KNOWN_SYMBOLS: dict[str, str] = {
 }
 
 
-def is_stable(chain: str, asset: str) -> bool:
-    return asset in STABLE_ASSETS.get(chain, frozenset())
+# Na Hyperliquid o ativo spot é o código do par ("@230"); o nome só chega pelo spotMeta.
+# Estes são os dólares que a própria Hyperliquid usa como moeda de cotação.
+HYPERLIQUID_STABLE_SYMBOLS = frozenset({"USDC", "USDH", "USDT0", "USDE"})
+
+
+def is_stable(chain: str, asset: str, symbol: str | None = None) -> bool:
+    if asset in STABLE_ASSETS.get(chain, frozenset()):
+        return True
+    return chain == "hyperliquid" and (symbol or "").upper() in HYPERLIQUID_STABLE_SYMBOLS
 
 
 def short(asset: str) -> str:
