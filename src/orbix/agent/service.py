@@ -136,14 +136,17 @@ def build_blocks(
     ):
         items.append({"kind": "ptax", "label": f"PTAX · Banco Central · {day}", "url": PTAX_URL})
     for row in cited:
-        signature = row.tx_hash if len(row.tx_hash) <= 12 else f"{row.tx_hash[:4]}…{row.tx_hash[-4:]}"
-        items.append(
-            {
-                "kind": "tx",
-                "label": f"{tr('Transação', 'Transaction')} {signature}",
-                "url": tax.explorer_url(row),
-            }
-        )
+        # fill da Hyperliquid sem hash de verdade (ex.: conversão de poeira) ganha uma chave
+        # só pra não fundir com outro par (B7); não existe transação pra citar, só a carteira
+        is_real_tx = row.chain == "solana" or (row.tx_hash.startswith("0x") and set(row.tx_hash[2:]) != {"0"})
+        if is_real_tx:
+            short = row.tx_hash if len(row.tx_hash) <= 12 else f"{row.tx_hash[:4]}…{row.tx_hash[-4:]}"
+            label = f"{tr('Transação', 'Transaction')} {short}"
+        else:
+            addr = row.wallet_address
+            short = addr if len(addr) <= 12 else f"{addr[:4]}…{addr[-4:]}"
+            label = f"{tr('Carteira', 'Wallet')} {short}"
+        items.append({"kind": "tx", "label": label, "url": tax.explorer_url(row)})
     if status == "final":
         items.append(
             {"kind": "report", "label": tr(f"Relatório final de {month}", f"Final report for {month}")}

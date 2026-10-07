@@ -28,10 +28,16 @@ def _key(nonce: str) -> str:
 def front_origin(settings: Settings, origin: str | None) -> str:
     """Página que pediu o login. A carteira recusa a assinatura se o domínio da mensagem
     for diferente da página aberta; por isso vale a origem da requisição, mas só se ela
-    estiver entre as liberadas no CORS. Caso contrário, o endereço oficial do front."""
-    if origin and origin in settings.cors_origins:
-        return origin.rstrip("/")
-    return settings.app_url
+    estiver entre as liberadas no CORS. Caso contrário, o endereço oficial do front.
+
+    Nunca devolve algo sem esquema (http/https): sem "//", o urlsplit joga tudo pro path e
+    o domínio da primeira linha da mensagem fica vazio — a carteira recusa isso como mal
+    formado (relatório de testes de 06/10, B3)."""
+    candidate = origin.rstrip("/") if origin and origin in settings.cors_origins else settings.app_url
+    if urlsplit(candidate).netloc:
+        return candidate
+    # app_url também veio sem esquema: não arrisca mandar mensagem quebrada pra carteira
+    return candidate if "://" in candidate else f"https://{candidate}"
 
 
 def build_message(

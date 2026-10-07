@@ -14,7 +14,7 @@ LoginMethod = Literal["wallet", "email", "google", "github"]
 Plan = Literal["free", "pro", "accountant"]
 WalletStatus = Literal["synced", "syncing", "error", "empty", "pending"]
 StepState = Literal["done", "running", "pending", "error"]
-EventType = Literal["swap", "perp", "funding"]
+EventType = Literal["swap", "perp", "funding", "transfer"]
 ReportStatus = Literal["draft", "final"]
 
 HYPERLIQUID_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")

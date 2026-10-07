@@ -60,7 +60,9 @@ async def build_status(conn: asyncpg.Connection, redis: Redis, user_id: UUID) ->
         "select id, chain, address, status, sync_read, sync_total, sync_error, verified "
         "from public.wallets order by is_login desc, created_at"
     )
-    since = await conn.fetchval("select min(ts)::date from public.events")
+    # Sem o fuso, o ::date usa o timezone da sessão (UTC) e pode arredondar pro dia errado
+    # perto da meia-noite de Brasília (relatório de testes de 06/10, B5).
+    since = await conn.fetchval("select (min(ts) at time zone 'America/Sao_Paulo')::date from public.events")
     onboarded = await conn.fetchval(
         "select onboarded_at is not null from public.profiles where id = $1", user_id
     )

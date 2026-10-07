@@ -181,6 +181,53 @@ async def test_hyperliquid_sync(
 
 
 @respx.mock
+async def test_hyperliquid_unnamed_spot_pair_gets_a_real_symbol(
+    client: httpx.AsyncClient, admin: asyncpg.Connection, worker_db: Database, http_out: httpx.AsyncClient
+) -> None:
+    """A Hyperliquid chama pares sem nome de "@107"; sem resolver pelo spotMeta, o relatório
+    mostra o código em vez do token (relatório de testes de 06/10, B2)."""
+    headers, _, _, _ = await _login(client, admin)
+    added = (
+        await client.post(
+            "/api/wallets", json={"network": "hyperliquid", "address": "0x" + "b" * 40}, headers=headers
+        )
+    ).json()
+    fill = {
+        "coin": "@107",
+        "px": "20",
+        "sz": "5",
+        "side": "B",
+        "time": TS * 1000,
+        "dir": "Buy",
+        "closedPnl": "0",
+        "hash": "0x" + "0" * 64,
+        "oid": 999,
+        "tid": 1,
+        "fee": "0",
+        "feeToken": "USDC",
+    }
+    spot_meta = {
+        "tokens": [{"name": "USDC", "index": 0}, {"name": "HYPE", "index": 150}],
+        "universe": [{"name": "@107", "index": 107, "tokens": [150, 0]}],
+    }
+
+    def info(request: httpx.Request) -> httpx.Response:
+        kind = __import__("json").loads(request.content)["type"]
+        if kind == "userFillsByTime":
+            return httpx.Response(200, json=[fill])
+        if kind == "spotMeta":
+            return httpx.Response(200, json=spot_meta)
+        return httpx.Response(200, json=[])
+
+    respx.post("https://api.hyperliquid.xyz/info").mock(side_effect=info)
+    await sync_wallet(worker_db, sources(http_out, None), UUID(added["id"]))
+    symbol = await admin.fetchval(
+        "select symbol from public.assets where chain = 'hyperliquid' and asset = '@107'"
+    )
+    assert symbol == "HYPE"
+
+
+@respx.mock
 async def test_pricing_fills_brl_values_and_finishes_onboarding(
     client: httpx.AsyncClient, admin: asyncpg.Connection, worker_db: Database, http_out: httpx.AsyncClient
 ) -> None:

@@ -28,7 +28,7 @@ BRT = ZoneInfo("America/Sao_Paulo")
 ZERO = Decimal(0)
 CENT = Decimal("0.01")
 
-RowType = Literal["swap", "perp", "funding"]
+RowType = Literal["swap", "perp", "funding", "transfer"]
 # custo do que foi vendido sem aquisição conhecida: zero (regra da Receita) ou valor de mercado
 UnknownCost = Literal["zero", "market"]
 
@@ -158,6 +158,19 @@ def _label(events: list[Event]) -> str:
     return " + ".join(dict.fromkeys(e.symbol for e in events))
 
 
+def _total_qty(events: list[Event]) -> Decimal:
+    """Soma a quantidade só quando todas as pernas são do mesmo ativo (uma ordem executada
+    em vários fills, por exemplo). Pernas de ativos diferentes (rota com várias etapas) não
+    têm uma grandeza única para somar; mantém a da primeira, como antes.
+
+    Sem isso, uma venda de 0,00793 + 0,00449 do mesmo ativo (uma ordem, dois fills) aparecia
+    com quantidade 0,00793 mas custo/ganho da soma das duas pernas — custo por unidade quase
+    o dobro do real (relatório de testes de 06/10, B6)."""
+    if len({e.asset for e in events}) == 1:
+        return sum((e.qty for e in events), ZERO)
+    return events[0].qty
+
+
 def _slot(event: Event) -> int | None:
     slot = event.raw.get("slot")
     return slot if isinstance(slot, int) else None
@@ -170,6 +183,25 @@ def _protocol(event: Event) -> str | None:
     if not source or source in ("UNKNOWN", "SYSTEM_PROGRAM"):
         return None
     return source.replace("_", " ").title()
+
+
+def _leg_fees_brl(legs: list[Event]) -> Decimal | None:
+    """Taxa de cada fill quando vem no próprio evento (a Hyperliquid manda `fee`/`feeToken`
+    em cada fill, em vez de um evento de taxa à parte) e é em USDC — dá pra converter direto
+    pela PTAX da linha. Taxa paga no próprio ativo negociado (comum em spot) fica sem
+    conversão por enquanto: precisaria do preço desse ativo no instante, que esta função não
+    tem (relatório de testes de 06/10, B4; `UNKNOWN_COST_POLICY` não se aplica aqui)."""
+    total = ZERO
+    found = False
+    for leg in legs:
+        if str(leg.raw.get("feeToken") or "") != "USDC":
+            continue
+        amount = leg.raw.get("fee")
+        if amount is None or leg.ptax is None:
+            continue
+        total += _decimal(amount) * leg.ptax
+        found = True
+    return total if found else None
 
 
 def _swap_row(
@@ -213,7 +245,7 @@ def _swap_row(
         type="swap",
         chain=first.chain,
         asset=f"{_label(outs)} → {_label(ins)}",
-        quantity=first.qty,
+        quantity=_total_qty(outs),
         quantity_asset=first.symbol,
         tx_hash=first.tx_hash,
         wallet_address=first.wallet_address,
@@ -232,6 +264,34 @@ def _swap_row(
         policy=(first if out_total is not None else ins[0]).policy,
         price_ts=first.price_ts,
         ptax_date=next((e.ptax_date for e in (*outs, *ins) if e.ptax_date is not None), None),
+    )
+
+
+def _transfer_row(event: Event) -> Row:
+    """Entrada recebida (depósito ou recompensa) não gera imposto, mas fica visível: sem
+    isso ela só virava custo de aquisição por trás, e o usuário não tinha como ver que a
+    carteira foi lida (relatório de testes de 06/10, B9)."""
+    return Row(
+        id=event.id,
+        ts=event.ts,
+        type="transfer",
+        chain=event.chain,
+        asset=event.symbol,
+        quantity=event.qty,
+        quantity_asset=event.symbol,
+        tx_hash=event.tx_hash,
+        wallet_address=event.wallet_address,
+        value=event.brl_value,
+        cost=event.brl_value or ZERO,
+        gain=ZERO,
+        ptax=event.ptax,
+        manual=event.policy == "manual",
+        reportable=False,
+        wallet_label=event.wallet_label,
+        protocol=_protocol(event),
+        policy=event.policy,
+        price_ts=event.price_ts,
+        ptax_date=event.ptax_date,
     )
 
 
@@ -321,7 +381,7 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
             fees = (
                 sum((e.brl_value or ZERO for e in fee_events), ZERO)
                 if fee_events and all(e.brl_value is not None for e in fee_events)
-                else None
+                else _leg_fees_brl(outs + ins)
             )
             rows.append(_swap_row(state, outs, ins, unknown_cost, fees))
         for event in group:
@@ -329,7 +389,10 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
                 continue
             if event.kind in ("transfer_in", "transfer_out") and (event.tx_hash, event.asset) in internal:
                 continue
-            if event.kind in ("transfer_in", "reward", "swap_in"):
+            if event.kind in ("transfer_in", "reward"):
+                state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
+                rows.append(_transfer_row(event))
+            elif event.kind == "swap_in":
                 state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
             elif event.kind in ("transfer_out", "fee", "swap_out"):
                 state.positions[_key(event)].remove(event.qty)

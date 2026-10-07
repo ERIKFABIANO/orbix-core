@@ -11,6 +11,10 @@ from orbix.ingest.models import EventDraft, IngestError
 INFO_URL = "https://api.hyperliquid.xyz/info"
 USDC = "USDC"
 PAGE_LIMIT = 2000
+# A Hyperliquid zera o hash de alguns fills (conversão de poeira e outros eventos internos).
+# Tratar essa string como se fosse um hash de verdade funde fills de pares diferentes num só
+# evento (ver relatório de testes de 06/10, B1 e B7).
+_ZERO_HASH = "0x" + "0" * 64
 
 
 def _decimal(value: Any) -> Decimal | None:
@@ -24,6 +28,25 @@ def _is_spot(coin: str) -> bool:
     return coin.startswith("@") or "/" in coin
 
 
+def _fill_key(fill: dict[str, Any], coin: str, time_ms: int) -> str:
+    """Identifica a que ordem este fill pertence, para agrupar só fills do mesmo par e ordem.
+
+    Prioriza o hash real da Hyperliquid (vale como identidade da transação). Quando ele vem
+    zerado, agrupa por ordem (oid) + par: é o que a própria Hyperliquid usa para dizer que
+    vários fills pertencem à mesma execução. Sem oid (raríssimo), cai no id do fill ou no
+    instante, nunca compartilhando chave entre pares diferentes.
+    """
+    raw_hash = fill.get("hash")
+    if isinstance(raw_hash, str) and raw_hash and raw_hash != _ZERO_HASH:
+        return raw_hash[:100]
+    oid = fill.get("oid")
+    if isinstance(oid, int) and oid > 0:
+        return f"hl:{coin}:{oid}"[:100]
+    tid = fill.get("tid")
+    tid_part = tid if isinstance(tid, int) and tid > 0 else time_ms
+    return f"hl:{coin}:t{tid_part}"[:100]
+
+
 def normalize_fill(fill: dict[str, Any]) -> list[EventDraft]:
     coin = str(fill.get("coin") or "")[:40]
     price, size = _decimal(fill.get("px")), _decimal(fill.get("sz"))
@@ -31,8 +54,9 @@ def normalize_fill(fill: dict[str, Any]) -> list[EventDraft]:
     if not coin or price is None or size is None or size <= 0 or not isinstance(time_ms, int):
         return []
     ts = datetime.fromtimestamp(time_ms / 1000, UTC)
-    tx_hash = str(fill.get("hash") or f"fill-{tid}")[:100]
-    # vários fills podem dividir o mesmo hash; o id do fill torna o índice único e estável
+    tx_hash = _fill_key(fill, coin, time_ms)
+    # vários fills podem dividir a mesma chave (mesma ordem); o id do fill torna o índice
+    # único e estável dentro do grupo
     base_index = (int(tid) % 1_000_000_000) * 2 if isinstance(tid, int) else 0
     side = str(fill.get("side") or "")
     raw = {
@@ -135,3 +159,31 @@ class HyperliquidClient:
 
     async def funding(self, user: str, start_ms: int) -> list[dict[str, Any]]:
         return await self._info({"type": "userFunding", "user": user, "startTime": start_ms})
+
+    async def spot_meta_names(self) -> dict[str, str]:
+        """Nome do token base de cada par spot sem nome ('@107' etc.), pela lista pública
+        spotMeta. Pares já nomeados (ex.: PURR/USDC) não precisam disso."""
+        try:
+            response = await self._http.post(INFO_URL, json={"type": "spotMeta"}, timeout=20)
+        except httpx.HTTPError:
+            return {}
+        if response.status_code >= 400:
+            return {}
+        data = response.json()
+        if not isinstance(data, dict):
+            return {}
+        tokens = {
+            t.get("index"): str(t.get("name") or "") for t in data.get("tokens", []) if isinstance(t, dict)
+        }
+        names: dict[str, str] = {}
+        for pair in data.get("universe", []):
+            if not isinstance(pair, dict):
+                continue
+            pair_name = str(pair.get("name") or "")
+            legs = pair.get("tokens")
+            if not pair_name.startswith("@") or not isinstance(legs, list) or not legs:
+                continue
+            base = tokens.get(legs[0])
+            if base:
+                names[pair_name] = base
+        return names

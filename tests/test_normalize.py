@@ -223,6 +223,31 @@ def test_fills_sharing_a_hash_get_distinct_indexes() -> None:
     assert first.event_index != second.event_index
 
 
+def test_zero_hash_fills_group_by_order_and_pair() -> None:
+    """A Hyperliquid zera o hash de alguns fills; agrupar só por hash funde pares diferentes
+    num evento só (relatório de testes de 06/10, B1 e B7). Mesma ordem (oid) e par: agrupa."""
+    zero_hash = "0x" + "0" * 64
+    first = hyperliquid.normalize_fill({**FILL, "hash": zero_hash, "oid": 999, "tid": 1})[0]
+    second = hyperliquid.normalize_fill({**FILL, "hash": zero_hash, "oid": 999, "tid": 2})[0]
+    assert first.tx_hash == second.tx_hash
+    assert first.event_index != second.event_index
+
+
+def test_zero_hash_fills_of_different_pairs_never_merge() -> None:
+    zero_hash = "0x" + "0" * 64
+    hype = hyperliquid.normalize_fill({**FILL, "hash": zero_hash, "coin": "HYPE", "oid": 1, "tid": 1})[0]
+    ubtc = hyperliquid.normalize_fill({**FILL, "hash": zero_hash, "coin": "UBTC", "oid": 2, "tid": 2})[0]
+    assert hype.tx_hash != ubtc.tx_hash
+    # mesmo sem oid (caso raro de conversão de poeira), não pode cair na mesma chave
+    dust_a = hyperliquid.normalize_fill(
+        {**FILL, "hash": zero_hash, "coin": "HYPE", "oid": None, "tid": 0, "time": 1}
+    )[0]
+    dust_b = hyperliquid.normalize_fill(
+        {**FILL, "hash": zero_hash, "coin": "UBTC", "oid": None, "tid": 0, "time": 2}
+    )[0]
+    assert dust_a.tx_hash != dust_b.tx_hash
+
+
 def test_spot_fill_becomes_swap() -> None:
     bought = hyperliquid.normalize_fill(
         {**FILL, "coin": "@107", "side": "B", "px": "20", "sz": "5", "closedPnl": "0"}

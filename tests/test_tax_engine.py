@@ -67,12 +67,49 @@ def test_average_cost_and_gain() -> None:
     assert (sale.quantity, sale.quantity_asset) == (Decimal("5"), "SOL")
 
 
+def test_multi_fill_sale_sums_quantity_not_just_the_first_leg() -> None:
+    """Duas pernas de venda do mesmo ativo numa só transação (uma ordem em dois fills, como a
+    Hyperliquid faz): a quantidade da linha soma as duas pernas, não só a primeira. Sem isso o
+    custo por unidade parecia quase o dobro do real (relatório de testes de 06/10, B6)."""
+    events = [*swap(("USDC", "1243", "6220"), ("UBTC", "0.01243", "6220"))]  # compra 0,01243 UBTC
+    tx = f"swap{next(_ids)}"
+    events += [
+        ev("swap_out", "UBTC", "0.00793", "4000", tx=tx),
+        ev("swap_out", "UBTC", "0.00449", "2264", tx=tx),
+        ev("swap_in", "USDC", "6264", "6264", tx=tx),
+    ]
+    rows = compute_rows(events)
+    sale = rows[-1]
+    assert sale.quantity == Decimal("0.01242")
+    # custo das duas pernas somadas, proporcional à posição inteira (não só à primeira perna)
+    assert money(sale.cost) == money(Decimal("6220") * Decimal("0.01242") / Decimal("0.01243"))
+    # a perna sozinha, só pra deixar claro o que o bug mostrava: bem menos do que o custo real
+    assert money(sale.cost) != money(Decimal("6220") * Decimal("0.00793") / Decimal("0.01243"))
+
+
+def test_hyperliquid_fee_in_usdc_is_captured_from_the_fill() -> None:
+    """A Hyperliquid manda fee/feeToken em cada fill, não num evento de taxa à parte; sem
+    isso o campo de taxas aparecia como indisponível (relatório de testes de 06/10, B4)."""
+    tx = f"swap{next(_ids)}"
+    sell = ev("swap_out", "SOL", "5", "2500", tx=tx, raw={"fee": "1.5", "feeToken": "USDC"})
+    buy = ev("swap_in", "USDC", "2500", "2500", tx=tx)
+    rows = compute_rows([sell, buy])
+    assert rows[-1].fees == Decimal("1.5") * Decimal("5")  # taxa vezes a PTAX da linha
+
+    # taxa paga no próprio ativo negociado: sem preço dele aqui, fica indisponível (não inventa)
+    tx2 = f"swap{next(_ids)}"
+    sell2 = ev("swap_out", "SOL", "5", "2500", tx=tx2, raw={"fee": "0.01", "feeToken": "SOL"})
+    buy2 = ev("swap_in", "USDC", "2500", "2500", tx=tx2)
+    rows2 = compute_rows([sell2, buy2])
+    assert rows2[-1].fees is None
+
+
 def test_stablecoin_purchase_is_a_disposal_of_the_stablecoin_at_cost() -> None:
     events = [
         ev("transfer_in", "USDC", "1000", "5000"),
         *swap(("USDC", "1000", "5000"), ("SOL", "10", "5000"), ts=T0 + timedelta(hours=1)),
     ]
-    (row,) = compute_rows(events)
+    row = compute_rows(events)[-1]
     assert (row.value, row.cost, row.gain) == (Decimal("5000"), Decimal("5000"), Decimal("0"))
 
 
@@ -81,7 +118,7 @@ def test_one_priced_leg_prices_the_whole_swap() -> None:
         ev("transfer_in", "MEME", "1000", "100"),
         *swap(("MEME", "1000", None), ("USDC", "50", "250"), ts=T0 + timedelta(hours=1)),
     ]
-    (row,) = compute_rows(events)
+    row = compute_rows(events)[-1]
     assert (row.value, row.cost, row.gain) == (Decimal("250"), Decimal("100"), Decimal("150"))
 
 
@@ -97,26 +134,38 @@ def test_selling_more_than_known_history_uses_zero_cost_for_the_rest() -> None:
         ev("transfer_in", "SOL", "1", "500"),
         *swap(("SOL", "3", "1800"), ("USDC", "360", "1800"), ts=T0 + timedelta(hours=1)),
     ]
-    (row,) = compute_rows(events)
+    row = compute_rows(events)[-1]
     assert (row.cost, row.gain) == (Decimal("500"), Decimal("1300"))
     assert row.cost_unknown is True
 
     # com a política "market", a parte sem origem entra pelo valor da venda: 2/3 de 1.800
-    (market,) = compute_rows(events, "market")
+    market = compute_rows(events, "market")[-1]
     assert (market.cost, market.gain) == (Decimal("1700"), Decimal("100"))
     assert market.cost_unknown is True
 
 
-def test_transfers_fees_and_staking_do_not_create_rows() -> None:
+def test_fees_and_staking_do_not_create_rows() -> None:
     events = [
-        ev("transfer_in", "SOL", "10", "5000"),
         ev("fee", "SOL", "0.01", "5"),
         ev("stake", "SOL", "5", "2500"),
         ev("unstake", "SOL", "5", "2600"),
         ev("transfer_out", "SOL", "2", "1000"),
-        ev("reward", "SOL", "0.1", "50"),
     ]
     assert compute_rows(events) == []
+
+
+def test_deposits_and_rewards_show_up_but_are_not_taxed() -> None:
+    """Entrada recebida não gera imposto, mas precisa aparecer — senão o usuário não tem como
+    ver que a carteira foi lida (relatório de testes de 06/10, B9)."""
+    events = [ev("transfer_in", "SOL", "10", "5000"), ev("reward", "SOL", "0.1", "50")]
+    rows = compute_rows(events)
+    assert [(r.type, r.reportable, r.quantity) for r in rows] == [
+        ("transfer", False, Decimal("10")),
+        ("transfer", False, Decimal("0.1")),
+    ]
+    # não entra no total nem conta como pendência, mesmo sem reportable
+    totals = summarize(rows, LIMIT, RATE)
+    assert (totals.rows, totals.missing_prices, totals.disposed) == (0, 0, Decimal("0"))
 
 
 def test_transfer_between_own_wallets_keeps_cost_basis() -> None:
@@ -240,7 +289,7 @@ def test_selling_everything_realizes_exactly_the_total_cost(
     events += swap(
         ("SOL", str(total_qty), str(proceeds)), ("USDC", "1", str(proceeds)), ts=T0 + timedelta(days=1)
     )
-    (row,) = compute_rows(events)
+    row = compute_rows(events)[-1]
     assert abs(row.cost - total_cost) < Decimal("0.000001")
     assert abs(row.gain - (proceeds - total_cost)) < Decimal("0.000001")
 
@@ -259,5 +308,5 @@ def test_partial_sale_cost_stays_between_zero_and_total(
     if sold <= 0:
         return
     events += swap(("SOL", str(sold), "1000"), ("USDC", "200", "1000"), ts=T0 + timedelta(days=1))
-    (row,) = compute_rows(events)
+    row = compute_rows(events)[-1]
     assert Decimal(0) <= row.cost <= total_cost + Decimal("0.000001")

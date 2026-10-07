@@ -2,7 +2,27 @@ import asyncpg
 import httpx
 from solders.keypair import Keypair
 
+from orbix.auth.wallet import front_origin
+from orbix.config import Settings
 from tests.conftest import bearer, wallet_login
+
+
+def _settings(**overrides: object) -> Settings:
+    return Settings(database_url="postgresql://x", redis_url="redis://x", **overrides)  # type: ignore[arg-type]
+
+
+def test_front_origin_never_comes_back_without_a_scheme() -> None:
+    """Sem esquema, a primeira linha da mensagem fica com domínio vazio e a carteira recusa
+    como mal formada (relatório de testes de 06/10, B3)."""
+    # app_url mal configurado (faltou o https://)
+    settings = _settings(app_url="declare.orbixlab.com.br", cors_origins=[])
+    assert front_origin(settings, None) == "https://declare.orbixlab.com.br"
+    # origem fora da lista de CORS: cai pro app_url, que aqui está correto
+    settings = _settings(app_url="https://declare.orbixlab.com.br", cors_origins=["https://app.orbix.test"])
+    assert front_origin(settings, "https://evil.example") == "https://declare.orbixlab.com.br"
+    # origem liberada: usa ela, não o app_url
+    settings = _settings(app_url="https://declare.orbixlab.com.br", cors_origins=["https://app.orbix.test"])
+    assert front_origin(settings, "https://app.orbix.test") == "https://app.orbix.test"
 
 
 async def test_login_creates_account_session_and_login_wallet(

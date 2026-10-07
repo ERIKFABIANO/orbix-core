@@ -41,6 +41,16 @@ on conflict (wallet_id, tx_hash, event_index) do nothing
 """
 
 
+def _initial_symbol(chain: str, asset: str) -> str | None:
+    if chain == "solana":
+        return KNOWN_SYMBOLS.get(asset)
+    # par spot sem nome da Hyperliquid ("@107"): fica sem símbolo até o spotMeta resolver
+    # (relatório de testes de 06/10, B2). Os demais (USDC, HYPE-PERP, PURR/USDC...) já são legíveis.
+    if asset.startswith("@"):
+        return None
+    return asset[:16]
+
+
 async def _store(
     conn: asyncpg.Connection, wallet: asyncpg.Record, drafts: list[EventDraft], read: int
 ) -> None:
@@ -50,10 +60,7 @@ async def _store(
         await conn.executemany(
             "insert into public.assets (chain, asset, symbol, is_stable) values ($1, $2, $3, $4) "
             "on conflict (chain, asset) do nothing",
-            [
-                (chain, a, KNOWN_SYMBOLS.get(a) if chain == "solana" else a[:16], is_stable(chain, a))
-                for a in assets
-            ],
+            [(chain, a, _initial_symbol(chain, a), is_stable(chain, a)) for a in assets],
         )
         await conn.executemany(
             INSERT_EVENT,
@@ -170,7 +177,29 @@ async def _sync_hyperliquid(db: Database, sources: Sources, wallet: asyncpg.Reco
     funding_next = await drain(
         sources.hyperliquid.funding, hyperliquid.normalize_funding, funding_from, HL_FUNDING_PAGE
     )
+    await _fill_hyperliquid_symbols(db, sources.hyperliquid)
     return f"{fills_next}:{funding_next}", read
+
+
+async def _fill_hyperliquid_symbols(db: Database, client: HyperliquidClient) -> None:
+    async with db.service() as conn:
+        missing = [
+            r["asset"]
+            for r in await conn.fetch(
+                "select asset from public.assets "
+                "where chain = 'hyperliquid' and symbol is null and asset like '@%' limit 300"
+            )
+        ]
+    if not missing:
+        return
+    names = await client.spot_meta_names()
+    updates = [(asset, names[asset]) for asset in missing if asset in names]
+    if not updates:
+        return
+    async with db.service() as conn:
+        await conn.executemany(
+            "update public.assets set symbol = $2 where chain = 'hyperliquid' and asset = $1", updates
+        )
 
 
 async def sync_wallet(db: Database, sources: Sources, wallet_id: UUID) -> UUID | None:
