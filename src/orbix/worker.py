@@ -18,6 +18,7 @@ from orbix.ingest.helius import HeliusClient, ipv4_client
 from orbix.ingest.hyperliquid import HyperliquidClient
 from orbix.ingest.sync import Sources, price_and_finish, sync_wallet
 from orbix.logging import configure_logging
+from orbix.prices import ptax
 from orbix.queue import ACTIVE_TTL, active_key
 
 log = structlog.get_logger()
@@ -94,6 +95,11 @@ REPRICE_USERS_PER_RUN = 20
 async def reprice_pending(ctx: dict[str, Any]) -> None:
     """Tenta de novo o preço de eventos que ficaram sem valor (ex.: CoinGecko pediu para esperar)."""
     db: Database = ctx["db"]
+    # evento que ficou com a PTAX da véspera porque a do dia ainda não tinha saído
+    async with db.service() as conn:
+        refreshed = await ptax.refresh_stale(conn, ctx["sources"].http)
+    if refreshed:
+        log.info("ptax do dia aplicada", events=refreshed)
     async with db.service() as conn:
         users = await conn.fetch(
             """
