@@ -1,4 +1,4 @@
-from typing import cast
+from typing import Literal, cast
 
 from fastapi import APIRouter, Depends, Request
 
@@ -27,15 +27,15 @@ async def ask_agent(
     settings: Settings = Depends(settings_dep),
 ) -> AgentReplyOut:
     llm = cast(AgentLLM | None, request.app.state.llm)
-    if llm is None:
-        raise AppError("agent_unavailable", 503)
 
     async with db.service() as conn:
         profile = await auth_service.load_user(conn, settings, user.id)
     if profile is None:
         raise AppError("unauthorized", 401)
-    if profile.agent_questions_left <= 0:
-        raise AppError("quota", 429)
+    # sem modelo ou sem cota a pergunta não fica sem resposta: sai a explicação por regras
+    rules_reason: Literal["unavailable", "quota"] | None = (
+        "unavailable" if llm is None else "quota" if profile.agent_questions_left <= 0 else None
+    )
 
     conversation = agent.conversation_uuid(body.conversation_id)
     async with db.as_user(user.id) as conn:
@@ -56,12 +56,23 @@ async def ask_agent(
     system, user_message, refs = agent.build_prompt(
         settings, month, status, tax.report_rows(month_rows), totals, previous, body.message
     )
-    answer = await agent.ask(llm, system, history, user_message)
+    answer = None
+    if llm is not None and rules_reason is None:
+        try:
+            answer = await agent.ask(llm, system, history, user_message)
+        except AppError as exc:
+            if exc.code != "agent_unavailable":
+                raise
+            rules_reason = "unavailable"
+    if answer is None:
+        answer = agent.rules_answer(month, tax.report_rows(month_rows), totals, refs)
     blocks, source = agent.build_blocks(answer, refs, status, month)
 
-    # a pergunta só é descontada da cota depois que o modelo respondeu
-    async with db.service() as conn:
-        left = await auth_service.consume_agent_question(conn, settings, user.id)
+    # a pergunta só é descontada da cota quando o modelo respondeu; resposta por regras não gasta
+    left = profile.agent_questions_left
+    if rules_reason is None:
+        async with db.service() as conn:
+            left = await auth_service.consume_agent_question(conn, settings, user.id)
     async with db.as_user(user.id) as conn:
         message_id, created_at = await agent.save_exchange(
             conn, conversation, month, body.message, blocks, answer.text
@@ -69,8 +80,15 @@ async def ask_agent(
 
     return AgentReplyOut(
         conversation_id=str(conversation),
-        message=AgentMessageOut(id=str(message_id), role="assistant", blocks=blocks, created_at=created_at),
+        message=AgentMessageOut(
+            id=str(message_id),
+            role="assistant",
+            blocks=blocks,
+            created_at=created_at,
+            source="ai" if rules_reason is None else "rules",
+        ),
         context=agent.build_context(settings, month, status, totals, source),
         suggestions=[s[:120] for s in answer.suggestions[:3]],
         questions_left=left,
+        rules_reason=rules_reason,
     )

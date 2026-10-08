@@ -8,12 +8,13 @@ Proteções:
 
 import json
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
 import asyncpg
 
-from orbix.agent.llm import AgentAnswer, AgentLLM
+from orbix.agent.llm import AgentAnswer, AgentLLM, BreakdownLine
 from orbix.config import Settings
 from orbix.i18n import get_locale, tr
 from orbix.schemas import AgentContextOut, AgentSourceTxOut, ReportStatus
@@ -105,11 +106,71 @@ def build_prompt(
     return system, user, refs
 
 
+def _brl(value: Decimal | None) -> str:
+    text = f"{money(value):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {text}"
+
+
+def rules_answer(month: str, rows: list[Row], totals: Totals, refs: dict[str, Row]) -> AgentAnswer:
+    """Explicação montada só com as regras de cálculo e os números do mês, sem modelo de
+    linguagem. Usada quando a IA está fora do ar ou a cota do usuário acabou: quem pergunta
+    continua recebendo os números e de onde eles vêm, com a origem identificada."""
+    biggest = sorted(refs.items(), key=lambda item: abs(item[1].gain), reverse=True)[:3]
+    if not rows:
+        text = tr(
+            f"Não há operações tributáveis registradas em {month}.",
+            f"There are no taxable operations recorded in {month}.",
+        )
+    else:
+        text = tr(
+            f"Em {month} foram {totals.rows} operação(ões) no relatório. O total alienado foi de "
+            f"{_brl(totals.disposed)}, com custo de aquisição de {_brl(totals.cost)} e resultado de "
+            f"{_brl(totals.gain)}. O imposto estimado é de {_brl(totals.tax)}. "
+            "O custo vem do custo médio ponderado de cada ativo e a conversão para reais usa a PTAX "
+            "de venda do Banco Central no dia de cada operação. "
+            "É uma estimativa e não substitui um contador.",
+            f"In {month} there were {totals.rows} operation(s) in the report. Total disposed was "
+            f"{_brl(totals.disposed)}, with an acquisition cost of {_brl(totals.cost)} and a result of "
+            f"{_brl(totals.gain)}. Estimated tax is {_brl(totals.tax)}. "
+            "Cost comes from the weighted average cost of each asset and conversion to reais uses the "
+            "Central Bank PTAX selling rate on the day of each operation. This is an estimate and does "
+            "not replace an accountant.",
+        )
+        if totals.missing_prices:
+            text += tr(
+                f" Há {totals.missing_prices} evento(s) sem preço, fora desses totais.",
+                f" {totals.missing_prices} event(s) have no price and are outside these totals.",
+            )
+    breakdown = (
+        [
+            BreakdownLine(
+                label=tr("Total alienado", "Total disposed"), value=_brl(totals.disposed), emphasis="none"
+            ),
+            BreakdownLine(
+                label=tr("Custo de aquisição", "Acquisition cost"), value=_brl(totals.cost), emphasis="none"
+            ),
+            BreakdownLine(label=tr("Resultado", "Result"), value=_brl(totals.gain), emphasis="total"),
+            BreakdownLine(
+                label=tr("Imposto estimado", "Estimated tax"), value=_brl(totals.tax), emphasis="gain"
+            ),
+        ]
+        if rows
+        else []
+    )
+    return AgentAnswer(
+        text=text,
+        breakdown=breakdown,
+        cited_rows=[ref for ref, _ in biggest],
+        suggestions=[],
+    )
+
+
 def _type_label(row: Row) -> str:
     return {
         "swap": "Swap",
         "perp": tr("Perpétuo", "Perp"),
         "funding": "Funding",
+        "transfer": tr("Transferência", "Transfer"),
     }[row.type]
 
 

@@ -40,7 +40,7 @@ api = {
     "APP_URL": APP,
     "API_URL": f"https://{DOMAIN}",
     # localhost:3000/3100: o Filipe (e os testes locais do front) rodando contra a API de produção.
-    "CORS_ORIGINS": f'["{APP}","http://localhost:3000","http://localhost:3100"]',
+    "CORS_ORIGINS": f'["{APP}","http://localhost:3000","http://localhost:3100","http://127.0.0.1:3000"]',
     # 127.0.0.1: healthcheck interno do container
     "ALLOWED_HOSTS": f'["{DOMAIN}","127.0.0.1"]',
     "RESEND_API_KEY": v.get("RESEND_API_KEY", ""),

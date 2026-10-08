@@ -112,7 +112,8 @@ Estão em `src/orbix/tax/engine.py`. São estimativa, não orientação fiscal. 
 | Stablecoin na Hyperliquid | USDC, USDH, USDT0 e USDE valem pelo próprio valor quando vendidas sem compra no histórico |
 | Arredondamento | Valor e custo de cada linha em centavos; ganho = valor − custo. O total do mês é a soma exata das linhas |
 | Taxa | Informativa (`feesBrl` e coluna `taxas_brl` do CSV). Não entra no custo até o contador definir |
-| Funding | Recebido é ganho; pago é custo |
+| Funding | Recebido é ganho; pago é custo. Um evento por lançamento devolvido pela Hyperliquid (ver README, "Funding") |
+| Transferência | Entrada e saída aparecem como `transfer` (fora do relatório, ganho zero), com `direction` e `counterparty` quando a transação tem um único endereço do outro lado |
 | Isenção | Total alienado em spot no mês até R$ 35.000: ganho em spot isento. Perpétuos e funding não entram na isenção |
 | Alíquota | 15% sobre o ganho tributável. Faixas progressivas acima de R$ 5 milhões não estão implementadas |
 | Câmbio | PTAX de venda do dia da operação, ou do último dia útil |

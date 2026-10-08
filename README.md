@@ -48,6 +48,21 @@ uv run alembic upgrade head       # usa MIGRATION_DATABASE_URL
 Mudança de banco só por migração neste repositório. Tabela nova em `public` precisa de RLS e de
 `revoke` dos acessos automáticos de `anon` e `authenticated` na mesma migração.
 
+## Funding da Hyperliquid
+
+A Hyperliquid cobra funding de hora em hora. O Orbix não agrupa nada: grava um evento para cada lançamento que a API `userFunding` devolve. Quem consolida é a própria Hyperliquid. Para períodos antigos ela devolve um lançamento por dia, com o campo `nSamples` dizendo quantas cobranças horárias ele soma; para períodos recentes devolve cada hora.
+
+Por isso o mesmo dia pode aparecer como um evento só ou como vários, dependendo de quando a carteira foi lida. A soma do funding de um dia no app tem de bater com a soma dos lançamentos desse dia na API. Funding recebido entra como ganho e funding pago como custo, convertidos pela PTAX do dia.
+
+## CSV do relatório
+
+Colunas, nesta ordem (as novas entram sempre no fim):
+
+`data,tipo,ativo,quantidade,ptax,valor_brl,custo_brl,ganho_brl,preco_manual,taxas_brl,custo_desconhecido,rede,carteira,custo_informado`
+
+- A linha `total` é a soma exata das linhas.
+- No relatório final há uma última linha `verificacao,<código>`: um código aleatório que entra no hash do arquivo. Sem ele, alguém poderia descobrir os valores testando combinações contra o hash público. O rascunho não tem essa linha; o que marca o rascunho é o `-rascunho` no nome do arquivo.
+
 ## Modelo de segurança
 
 - A API conecta como `orbix_api` (sem `BYPASSRLS`). Para ler dados do usuário, cada requisição

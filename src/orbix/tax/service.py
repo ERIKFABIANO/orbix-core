@@ -47,6 +47,7 @@ async def load_rows(conn: asyncpg.Connection) -> list[Row]:
         """
         select e.id, e.wallet_id, e.chain, e.tx_hash, e.ts, e.kind, e.asset, e.qty, e.brl_value,
                e.ptax, e.ptax_date, e.price_ts, e.pricing_policy, e.raw, e.cost_override_brl,
+               e.usd_price,
                a.symbol, a.is_stable,
                w.address, w.label
           from public.events e
@@ -76,6 +77,7 @@ async def load_rows(conn: asyncpg.Connection) -> list[Row]:
             price_ts=r["price_ts"],
             ptax_date=r["ptax_date"],
             cost_override=r["cost_override_brl"],
+            usd_price=r["usd_price"],
         )
         for r in records
     ]
@@ -167,6 +169,10 @@ def to_tax_event(row: Row, history: list[EventReviewOut] | None = None) -> TaxEv
         cost_brl=money(row.cost) if row.priced and row.reportable else None,
         gain_brl=money(row.gain) if row.priced and row.reportable else None,
         fill_count=row.fills,
+        cost_unknown=row.cost_unknown,
+        cost_manual=row.cost_manual,
+        direction=row.direction,
+        counterparty=row.counterparty,
         quantity_in=float(row.quantity_in) if row.quantity_in is not None else None,
         quantity_in_asset=row.quantity_in_asset,
         position_before_qty=float(row.position_before_qty) if row.position_before_qty is not None else None,

@@ -5,6 +5,7 @@ descrição em texto: o que saiu, o que entrou e a taxa paga. Texto vindo da blo
 (descrições, nomes de token) é tratado só como dado.
 """
 
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -19,6 +20,8 @@ MIN_SOL = Decimal("0.00001")
 # aluguel de conta de token e gorjetas de prioridade aparecem como SOL saindo num swap
 # de token por token; não é uma perna do swap
 RENT_NOISE_SOL = Decimal("0.02")
+
+_ADDRESS = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 STAKE_TYPES = frozenset({"STAKE_SOL", "STAKE_TOKEN", "INIT_STAKE", "DEPOSIT"})
 UNSTAKE_TYPES = frozenset({"UNSTAKE_SOL", "UNSTAKE_TOKEN", "WITHDRAW", "DEACTIVATE_STAKE"})
@@ -43,6 +46,29 @@ def _balance_deltas(tx: dict[str, Any], wallet: str) -> dict[str, Decimal]:
                 # SOL embrulhado (wSOL) é SOL para fins de posição e preço
                 deltas[SOL if mint == WSOL_MINT else mint] += amount
     return deltas
+
+
+def _counterparties(tx: dict[str, Any], wallet: str) -> dict[tuple[str, str], str]:
+    """(direção, ativo) -> endereço do outro lado da transferência.
+
+    Só quando há um único endereço do outro lado; com vários (pagamento em lote, por
+    exemplo) fica sem contraparte em vez de escolher uma. Só entra o que tem formato de
+    endereço: nada de texto livre vindo da blockchain."""
+    found: dict[tuple[str, str], set[str]] = defaultdict(set)
+    moves: list[tuple[str, Any]] = [(SOL, t) for t in tx.get("nativeTransfers") or []]
+    for t in tx.get("tokenTransfers") or []:
+        mint = str(t.get("mint") or "") if isinstance(t, dict) else ""
+        if mint:
+            moves.append((SOL if mint == WSOL_MINT else mint, t))
+    for asset, move in moves:
+        if not isinstance(move, dict):
+            continue
+        sender, receiver = str(move.get("fromUserAccount") or ""), str(move.get("toUserAccount") or "")
+        if receiver == wallet and sender != wallet and _ADDRESS.match(sender):
+            found[("in", asset)].add(sender)
+        elif sender == wallet and receiver != wallet and _ADDRESS.match(receiver):
+            found[("out", asset)].add(receiver)
+    return {key: next(iter(addresses)) for key, addresses in found.items() if len(addresses) == 1}
 
 
 def normalize_transaction(tx: dict[str, Any], wallet: str) -> list[EventDraft]:
@@ -96,8 +122,11 @@ def normalize_transaction(tx: dict[str, Any], wallet: str) -> list[EventDraft]:
         in_kind = "transfer_in"
 
     events: list[EventDraft] = []
+    others = _counterparties(tx, wallet)
 
     def add(kind: str, asset: str, qty: Decimal) -> None:
+        direction = {"transfer_in": "in", "transfer_out": "out"}.get(kind)
+        other = others.get((direction, asset)) if direction else None
         events.append(
             EventDraft(
                 tx_hash=signature,
@@ -106,7 +135,7 @@ def normalize_transaction(tx: dict[str, Any], wallet: str) -> list[EventDraft]:
                 kind=kind,
                 asset=asset,
                 qty=qty,
-                raw=raw,
+                raw={**raw, "counterparty": other} if other else raw,
             )
         )
 

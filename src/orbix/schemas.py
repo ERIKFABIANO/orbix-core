@@ -231,6 +231,12 @@ class TaxEventOut(Out):
     # origem do custo: posição do ativo antes da venda e custo médio por unidade usado
     position_before_qty: float | None = None
     avg_cost_unit_brl: float | None = None
+    # as mesmas marcações da linha do relatório, para o front não precisar cruzar as duas rotas
+    cost_unknown: bool = False
+    cost_manual: bool = False
+    # transferência: "in" (entrada) ou "out" (saída) e o endereço do outro lado, quando há um só
+    direction: Literal["in", "out"] | None = None
+    counterparty: str | None = None
     pending_reasons: list[str] = []
     review_history: list[EventReviewOut] = []
 
@@ -358,6 +364,9 @@ class AgentMessageOut(Out):
     role: Literal["user", "assistant"]
     blocks: list[dict[str, Any]]
     created_at: datetime
+    # "rules": texto montado pelas regras de cálculo, sem modelo de linguagem (IA fora do ar
+    # ou cota esgotada). O front identifica a resposta como "Regras, não IA".
+    source: Literal["ai", "rules"] = "ai"
 
 
 class AgentSourceTxOut(Out):
@@ -383,3 +392,5 @@ class AgentReplyOut(Out):
     context: AgentContextOut | None
     suggestions: list[str]
     questions_left: int
+    # por que a resposta veio por regras (null quando veio da IA)
+    rules_reason: Literal["unavailable", "quota"] | None = None

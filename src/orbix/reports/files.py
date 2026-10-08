@@ -9,7 +9,7 @@ from orbix.tax.engine import BRT, Row, Totals
 # as colunas novas entram sempre no fim: quem já lê o arquivo pelas primeiras não quebra
 CSV_HEADER = (
     "data,tipo,ativo,quantidade,ptax,valor_brl,custo_brl,ganho_brl,preco_manual,"
-    "taxas_brl,custo_desconhecido,rede,carteira"
+    "taxas_brl,custo_desconhecido,rede,carteira,custo_informado"
 )
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
@@ -41,7 +41,8 @@ def build_csv(rows: list[Row], totals: Totals, *, nonce: str | None) -> bytes:
 
     `taxas_brl` é informativa (não entra no custo); vazia quando a fonte não informa a taxa.
     `custo_desconhecido` marca a venda cuja compra não está no histórico lido: o custo saiu
-    zero e o ganho está inflado até o usuário informar o custo.
+    zero e o ganho está inflado até o usuário informar o custo. `custo_informado` marca a
+    venda em que o usuário digitou o custo (diferente de `preco_manual`, que é o preço da venda).
     """
     lines = [CSV_HEADER]
     for row in rows:
@@ -61,6 +62,7 @@ def build_csv(rows: list[Row], totals: Totals, *, nonce: str | None) -> bytes:
                     "sim" if row.cost_unknown else "nao",
                     row.chain,
                     _cell(short(row.wallet_address)),
+                    "sim" if row.cost_manual else "nao",
                 ]
             )
         )
@@ -80,11 +82,12 @@ def build_csv(rows: list[Row], totals: Totals, *, nonce: str | None) -> bytes:
                 "",
                 "",
                 "",
+                "",
             ]
         )
     )
     if nonce:
-        lines.append(f"verificacao,{nonce}" + "," * 11)
+        lines.append(f"verificacao,{nonce}" + "," * 12)
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 

@@ -55,6 +55,8 @@ class Event:
     ptax_date: date | None = None
     # custo de aquisição informado pelo usuário para esta venda (revisão auditada)
     cost_override: Decimal | None = None
+    # preço em dólar de uma unidade do ativo, quando a fonte informa
+    usd_price: Decimal | None = None
 
 
 @dataclass
@@ -97,6 +99,9 @@ class Row:
     avg_cost_unit: Decimal | None = None
     # valor por unidade antes de arredondar a linha para centavos
     unit_price: Decimal | None = None
+    # transferência: entrada ou saída, e o endereço do outro lado quando a fonte informa
+    direction: Literal["in", "out"] | None = None
+    counterparty: str | None = None
 
     @property
     def priced(self) -> bool:
@@ -181,6 +186,23 @@ def _total_qty(events: list[Event]) -> Decimal:
     return events[0].qty
 
 
+def _exact_unit(events: list[Event]) -> Decimal | None:
+    """Preço em reais de uma unidade: preço em dólar vezes a PTAX, ponderado pela quantidade.
+
+    O valor em reais do evento fica guardado em centavos; dividir esse valor pela quantidade
+    distorce o preço quando a quantidade é pequena (0,14 / 0,026225 dá 5,34 em vez da PTAX
+    de 5,1495). Devolve None quando falta o preço em dólar ou a PTAX de alguma perna, ou
+    quando as pernas são de ativos diferentes."""
+    if not events or len({e.asset for e in events}) != 1:
+        return None
+    if any(e.usd_price is None or e.ptax is None or e.policy == "manual" for e in events):
+        return None
+    total = sum((e.qty for e in events), ZERO)
+    if total <= 0:
+        return None
+    return sum((e.qty * (e.usd_price or ZERO) * (e.ptax or ZERO) for e in events), ZERO) / total
+
+
 def _slot(event: Event) -> int | None:
     slot = event.raw.get("slot")
     return slot if isinstance(slot, int) else None
@@ -263,6 +285,7 @@ def _merge_perp_rows(rows: list[Row]) -> list[Row]:
         kept.fees = None if kept.fees is None or row.fees is None else kept.fees + row.fees
         kept.manual = kept.manual or row.manual
         kept.fills += row.fills
+        kept.unit_price = None
         if not _is_real_hash(kept.tx_hash) and _is_real_hash(row.tx_hash):
             kept.tx_hash = row.tx_hash
     return list(merged.values())
@@ -278,8 +301,12 @@ def _round_row(row: Row) -> None:
     linhas e o arquivo exportado fecha sem diferença de centavo."""
     if row.value is None:
         return
-    # antes de arredondar: valor em centavos dividido por quantidade pequena distorce o preço
-    row.unit_price = row.value / row.quantity if row.quantity else None
+    # o preço exato (dólar vezes PTAX) só vale se reproduz o valor da linha; se o preço em dólar
+    # guardado não é o que formou o valor (outra perna do swap, por exemplo), fica valor / quantidade
+    exact = row.unit_price
+    if exact is not None and row.type != "funding" and abs(exact * row.quantity - row.value) > CENT:
+        exact = None
+    row.unit_price = exact if exact is not None else (row.value / row.quantity if row.quantity else None)
     row.value = _to_cents(row.value)
     if row.type == "perp" and not row.reportable:
         row.cost = _to_cents(row.cost)
@@ -357,14 +384,18 @@ def _swap_row(
         quantity_in_asset=ins[0].symbol if single_in else None,
         position_before_qty=position_before,
         avg_cost_unit=cost / sold if single_out and value is not None and sold else None,
+        unit_price=_exact_unit(outs) if out_total is not None else None,
     )
 
 
-def _transfer_row(event: Event) -> Row:
-    """Entrada recebida (depósito ou recompensa) não gera imposto, mas fica visível: sem
-    isso ela só virava custo de aquisição por trás, e o usuário não tinha como ver que a
-    carteira foi lida (relatório de testes de 06/10, B9)."""
+def _transfer_row(event: Event, direction: Literal["in", "out"]) -> Row:
+    """Entrada (depósito ou recompensa) ou saída de cripto: não gera imposto, mas fica
+    visível. Sem isso ela só mexia no custo de aquisição por trás, e o usuário não tinha
+    como ver que a carteira foi lida (relatório de testes de 06/10, B9)."""
+    other = event.raw.get("counterparty")
     return Row(
+        direction=direction,
+        counterparty=other if isinstance(other, str) else None,
         id=event.id,
         ts=event.ts,
         type="transfer",
@@ -385,6 +416,7 @@ def _transfer_row(event: Event) -> Row:
         policy=event.policy,
         price_ts=event.price_ts,
         ptax_date=event.ptax_date,
+        unit_price=_exact_unit([event]),
     )
 
 
@@ -410,6 +442,7 @@ def _perp_row(state: _State, event: Event) -> Row:
         policy=event.policy,
         price_ts=event.price_ts,
         ptax_date=event.ptax_date,
+        unit_price=_exact_unit([event]),
     )
     if closed == 0:
         # abertura ou aumento de posição: só acumula a taxa para o próximo fechamento
@@ -444,6 +477,8 @@ def _funding_row(event: Event) -> Row:
         policy=event.policy,
         price_ts=event.price_ts,
         ptax_date=event.ptax_date,
+        # funding é pago em USDC: uma unidade vale a PTAX da linha, recebido ou pago
+        unit_price=event.ptax,
     )
     if event.ptax is not None:
         gain = amount * event.ptax
@@ -485,10 +520,13 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
                 continue
             if event.kind in ("transfer_in", "reward"):
                 state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
-                rows.append(_transfer_row(event))
+                rows.append(_transfer_row(event, "in"))
             elif event.kind == "swap_in":
                 state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
-            elif event.kind in ("transfer_out", "fee", "swap_out"):
+            elif event.kind == "transfer_out":
+                state.positions[_key(event)].remove(event.qty)
+                rows.append(_transfer_row(event, "out"))
+            elif event.kind in ("fee", "swap_out"):
                 state.positions[_key(event)].remove(event.qty)
             elif event.kind == "perp_fill":
                 perp_rows.append(_perp_row(state, event))

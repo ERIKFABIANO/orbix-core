@@ -152,9 +152,12 @@ def test_fees_and_staking_do_not_create_rows() -> None:
         ev("fee", "SOL", "0.01", "5"),
         ev("stake", "SOL", "5", "2500"),
         ev("unstake", "SOL", "5", "2600"),
-        ev("transfer_out", "SOL", "2", "1000"),
+        ev("transfer_out", "SOL", "2", "1000", raw={"counterparty": "Dest" + "1" * 40}),
     ]
-    assert compute_rows(events) == []
+    (sent,) = compute_rows(events)
+    # a saída aparece (com direção e contraparte), mas não é venda: fora do relatório, ganho zero
+    assert (sent.type, sent.direction, sent.counterparty) == ("transfer", "out", "Dest" + "1" * 40)
+    assert (sent.reportable, sent.gain) == (False, Decimal("0"))
 
 
 def test_deposits_and_rewards_show_up_but_are_not_taxed() -> None:
@@ -390,6 +393,28 @@ def test_unlisted_stablecoin_sold_without_history_has_no_gain() -> None:
     # token comum na mesma situação continua com custo zero, mas marcado para revisão
     (unknown,) = compute_rows([out, into])
     assert (unknown.cost, unknown.cost_unknown) == (Decimal("0"), True)
+
+
+def test_unit_price_comes_from_usd_price_times_ptax_not_from_the_rounded_value() -> None:
+    """O valor em reais chega do banco em centavos. Dividir por uma quantidade pequena
+    distorcia o preço: funding de 0,026225 USDC a R$ 0,14 dava 5,34 em vez da PTAX (B12)."""
+    hl = {"chain": "hyperliquid", "ptax": "5.1495"}
+    funding = ev("funding", "USDC", "0.026225", "0.14", raw={"coin": "HYPE", "usdc": "0.026225"}, **hl)
+    paid = ev("funding", "USDC", "0.046032", "0.24", raw={"coin": "HYPE", "usdc": "-0.046032"}, **hl)
+    received, charged = compute_rows([funding, paid])
+    assert (received.unit_price, charged.unit_price) == (Decimal("5.1495"), Decimal("5.1495"))
+
+    # compra de 30/04: 393,81 USDC a PTAX 4,9886 = R$ 1.964,56; antes saía 4,98859856
+    buy = {"chain": "hyperliquid", "ptax": "4.9886", "tx": "0xbuy"}
+    out = Event(**{**ev("swap_out", "USDC", "393.81", "1964.56", **buy).__dict__, "usd_price": Decimal(1)})
+    into = ev("swap_in", "@107", "10", "1964.56", **buy)
+    (row,) = compute_rows([out, into])
+    assert row.unit_price == Decimal("4.9886")
+
+    # preço em dólar que não reproduz o valor da linha não é usado: vale valor / quantidade
+    odd = Event(**{**ev("swap_out", "SOL", "4", "4000", tx="m").__dict__, "usd_price": Decimal(1)})
+    (other,) = compute_rows([odd, ev("swap_in", "USDC", "800", "4000", tx="m")])
+    assert other.unit_price == Decimal("1000")
 
 
 def test_order_filled_across_two_days_stays_in_each_day() -> None:

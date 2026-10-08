@@ -375,6 +375,14 @@ verificacao,7f3c…(64 caracteres hex),,,,,,,,,,,
 - `positionBeforeQty` e `avgCostUnitBrl`: posição do ativo antes da venda e custo médio por unidade usado. `costBrl` = `quantity` × `avgCostUnitBrl`.
 - `unitPriceBrl` passou a sair do valor antes do arredondamento para centavos (funding em USDC = PTAX da linha).
 
+Em 08/10:
+
+- `TaxEvent.costUnknown` e `TaxEvent.costManual`: as mesmas marcações da linha do relatório, direto no evento.
+- `TaxEvent.direction` (`"in"` ou `"out"`) e `TaxEvent.counterparty` nas transferências. Saída de cripto passou a aparecer como `transfer` (antes só a entrada aparecia). `counterparty` é `null` quando a transação tem mais de um endereço do outro lado, e nas transferências lidas antes de 08/10 até a carteira Solana ser sincronizada de novo.
+- CSV oficial: coluna `custo_informado` no fim (14 colunas). `sim` quando o usuário digitou o custo de aquisição da venda.
+- `POST /api/agent` não devolve mais `503 agent_unavailable` nem `429 quota`: responde `200` com `message.source = "rules"` e `rulesReason` (`"unavailable"` ou `"quota"`). O texto é montado pelas regras de cálculo, sem IA, e não gasta a cota. Com IA, `source = "ai"` e `rulesReason = null`. O front deve rotular a resposta como "Regras, não IA" quando `source = "rules"`.
+- CORS: `http://127.0.0.1:3000` liberado, além de `localhost:3000` e `localhost:3100`. Outras portas caem no domínio de produção e a carteira recusa a assinatura.
+
 É um código aleatório que impede alguém de descobrir os valores do relatório testando combinações contra o hash público. A página `/v/[id]` não muda: ela calcula o SHA-256 do arquivo inteiro, e essa linha faz parte do arquivo.
 
 O `reportToCsv` do front continua só para o modo demonstração.

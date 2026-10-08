@@ -25,7 +25,15 @@ async def test_reply_shape_and_server_built_citations(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert set(body) == {"conversationId", "message", "context", "suggestions", "questionsLeft"}
+    assert set(body) == {
+        "conversationId",
+        "message",
+        "context",
+        "suggestions",
+        "questionsLeft",
+        "rulesReason",
+    }
+    assert (body["message"]["source"], body["rulesReason"]) == ("ai", None)
     assert body["questionsLeft"] == 19
     assert body["suggestions"] == ["Como foi calculado o custo médio?"]
 
@@ -112,8 +120,16 @@ async def test_quota(client: httpx.AsyncClient, admin: asyncpg.Connection, llm: 
     )
     last = await client.post("/api/agent", json={"message": "última"}, headers=headers)
     assert last.json()["questionsLeft"] == 0
-    blocked = await client.post("/api/agent", json={"message": "mais uma"}, headers=headers)
-    assert (blocked.status_code, blocked.json()["error"]["code"]) == (429, "quota")
+    blocked = await client.post(
+        "/api/agent", json={"message": "mais uma", "month": "2026-09"}, headers=headers
+    )
+    # sem cota a pergunta não fica sem resposta: sai a explicação por regras, identificada
+    body = blocked.json()
+    assert blocked.status_code == 200
+    assert (body["message"]["source"], body["rulesReason"], body["questionsLeft"]) == ("rules", "quota", 0)
+    text = body["message"]["blocks"][0]["text"]
+    assert "R$ 9.000,00" in text and "R$ 2.000,00" in text  # total alienado e resultado de setembro
+    assert body["message"]["blocks"][1]["rows"][0] == {"label": "Total alienado", "value": "R$ 9.000,00"}
     assert len(llm.calls) == 1  # o modelo nem é chamado sem cota
     assert (await client.get("/api/me", headers=headers)).json()["agentQuestionsLeft"] == 0
 
@@ -134,8 +150,17 @@ async def test_failed_model_call_does_not_spend_quota(
 
     llm.answer = boom  # type: ignore[method-assign]
     response = await client.post("/api/agent", json={"message": "oi"}, headers=headers)
-    assert (response.status_code, response.json()["error"]["code"]) == (503, "agent_unavailable")
-    assert (await client.get("/api/me", headers=headers)).json()["agentQuestionsLeft"] == 20
+    body = response.json()
+    assert response.status_code == 200
+    assert (body["message"]["source"], body["rulesReason"]) == ("rules", "unavailable")
+    # resposta por regras não gasta a cota
+    assert (
+        body["questionsLeft"],
+        (await client.get("/api/me", headers=headers)).json()["agentQuestionsLeft"],
+    ) == (
+        20,
+        20,
+    )
 
 
 async def test_unavailable_without_model_and_input_limits(
@@ -150,8 +175,13 @@ async def test_unavailable_without_model_and_input_limits(
     ):
         assert (await client.post("/api/agent", json=bad, headers=headers)).status_code == 422
     client.app.state.llm = None  # type: ignore[attr-defined]
-    response = await client.post("/api/agent", json={"message": "oi"}, headers=headers)
-    assert (response.status_code, response.json()["error"]["code"]) == (503, "agent_unavailable")
+    response = await client.post(
+        "/api/agent", json={"message": "oi"}, headers={**headers, "Accept-Language": "en"}
+    )
+    body = response.json()
+    assert response.status_code == 200
+    assert (body["message"]["source"], body["rulesReason"]) == ("rules", "unavailable")
+    assert body["message"]["blocks"][0]["text"].startswith("In 2026-09 there were")
 
 
 def test_answer_is_clamped() -> None:
