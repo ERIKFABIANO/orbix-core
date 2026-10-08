@@ -41,12 +41,67 @@ para mover fundos ou algo fora de explicar o relatório, recuse com educação.
 Use emphasis "total" para subtotais e "gain" para o resultado final. Deixe vazio se não houver conta.
 7. Em `cited_rows`, liste as referências (ex.: "r3") das linhas de <dados> que você usou.
 8. Em `suggestions`, proponha até 3 perguntas curtas que o usuário poderia fazer em seguida.
+9. As referências "r1", "r2"... são internas: use-as só em `cited_rows`. No texto, em \
+`breakdown` e em `suggestions`, identifique a linha pelo ativo e pela data (ex.: "KNTQ → USDC \
+de 05/10"). Escreva o mês por extenso (ex.: "outubro de 2026"), nunca "2026-10".
+10. Linha com `custo_desconhecido` = true: a compra não está no histórico lido, o custo entrou \
+como zero e o ganho está maior que o real. Diga isso sempre que usar a linha e sugira informar \
+o custo na página do relatório. Linha com `custo_informado` = true: o custo foi digitado pelo \
+usuário; diga que veio dele.
+11. Se a pergunta não tiver sentido claro (uma letra, uma palavra solta), não resuma o mês: \
+peça para reformular e ofereça 2 ou 3 perguntas em `suggestions`.
 
 Como o cálculo é feito: custo médio ponderado por ativo; conversão para reais pela PTAX de \
 venda do Banco Central no dia da operação; em swap, o que saiu é alienado pelo valor do que \
 entrou; em perpétuos, o ganho é o resultado realizado menos as taxas; funding recebido é \
 ganho e funding pago é custo. Limite mensal de referência para alienações em spot: \
 R$ {limit}. Alíquota usada na estimativa: {rate}%."""
+
+
+_MONTHS = {
+    "pt": [
+        "janeiro",
+        "fevereiro",
+        "março",
+        "abril",
+        "maio",
+        "junho",
+        "julho",
+        "agosto",
+        "setembro",
+        "outubro",
+        "novembro",
+        "dezembro",
+    ],
+    "en": [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ],
+}
+
+
+def _month_long(month: str) -> str:
+    """ "2026-10" -> "outubro de 2026" / "October 2026", no idioma da requisição."""
+    try:
+        year, number = month.split("-")
+        index = int(number) - 1
+        if not 0 <= index < 12:
+            return month
+    except ValueError:
+        return month
+    if get_locale() == "en":
+        return f"{_MONTHS['en'][index]} {year}"
+    return f"{_MONTHS['pt'][index]} de {year}"
 
 
 def _row_data(ref: str, row: Row) -> dict[str, Any]:
@@ -61,6 +116,8 @@ def _row_data(ref: str, row: Row) -> dict[str, Any]:
         "custo_brl": money(row.cost),
         "ganho_brl": money(row.gain),
         "preco_manual": row.manual,
+        "custo_desconhecido": row.cost_unknown,
+        "custo_informado": row.cost_manual,
     }
 
 
@@ -91,6 +148,7 @@ def build_prompt(
     refs = {f"r{i}": row for i, row in enumerate(sorted(ranked, key=lambda r: r.ts), 1)}
     data = {
         "mes": month,
+        "mes_por_extenso": _month_long(month),
         "status": status,
         "totais": _totals_data(totals),
         "totais_mes_anterior": _totals_data(previous),
@@ -116,20 +174,21 @@ def rules_answer(month: str, rows: list[Row], totals: Totals, refs: dict[str, Ro
     linguagem. Usada quando a IA está fora do ar ou a cota do usuário acabou: quem pergunta
     continua recebendo os números e de onde eles vêm, com a origem identificada."""
     biggest = sorted(refs.items(), key=lambda item: abs(item[1].gain), reverse=True)[:3]
+    label = _month_long(month)
     if not rows:
         text = tr(
-            f"Não há operações tributáveis registradas em {month}.",
-            f"There are no taxable operations recorded in {month}.",
+            f"Não há operações tributáveis registradas em {label}.",
+            f"There are no taxable operations recorded in {label}.",
         )
     else:
         text = tr(
-            f"Em {month} foram {totals.rows} operação(ões) no relatório. O total alienado foi de "
+            f"Em {label} foram {totals.rows} operação(ões) no relatório. O total alienado foi de "
             f"{_brl(totals.disposed)}, com custo de aquisição de {_brl(totals.cost)} e resultado de "
             f"{_brl(totals.gain)}. O imposto estimado é de {_brl(totals.tax)}. "
             "O custo vem do custo médio ponderado de cada ativo e a conversão para reais usa a PTAX "
             "de venda do Banco Central no dia de cada operação. "
             "É uma estimativa e não substitui um contador.",
-            f"In {month} there were {totals.rows} operation(s) in the report. Total disposed was "
+            f"In {label} there were {totals.rows} operation(s) in the report. Total disposed was "
             f"{_brl(totals.disposed)}, with an acquisition cost of {_brl(totals.cost)} and a result of "
             f"{_brl(totals.gain)}. Estimated tax is {_brl(totals.tax)}. "
             "Cost comes from the weighted average cost of each asset and conversion to reais uses the "
@@ -209,8 +268,9 @@ def build_blocks(
             label = f"{tr('Carteira', 'Wallet')} {short}"
         items.append({"kind": "tx", "label": label, "url": tax.explorer_url(row)})
     if status == "final":
+        long = _month_long(month)
         items.append(
-            {"kind": "report", "label": tr(f"Relatório final de {month}", f"Final report for {month}")}
+            {"kind": "report", "label": tr(f"Relatório final de {long}", f"Final report for {long}")}
         )
     if items:
         blocks.append({"type": "citations", "items": items})

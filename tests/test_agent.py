@@ -191,3 +191,41 @@ def test_answer_is_clamped() -> None:
     assert len(huge.text) == 2500
     assert len(huge.cited_rows) == 6
     assert len(huge.suggestions) == 3 and len(huge.suggestions[0]) == 120
+
+
+def test_prompt_marks_unknown_cost_and_hides_refs() -> None:
+    """Relatório de testes de 08/10: o agente citava "r1"/"r2" no texto, escrevia "2026-10" e
+    não avisava que a sobra de KNTQ tinha custo desconhecido (o dado nem chegava ao modelo)."""
+    from datetime import UTC, datetime
+    from decimal import Decimal
+
+    from orbix.agent import service as agent
+    from orbix.config import get_settings
+    from orbix.i18n import set_locale
+    from orbix.tax.engine import Row, Totals
+
+    row = Row(
+        id="e1",
+        ts=datetime(2026, 10, 5, 15, 0, tzinfo=UTC),
+        type="swap",
+        chain="hyperliquid",
+        asset="KNTQ → USDC",
+        quantity=Decimal("0.009075"),
+        quantity_asset="KNTQ",
+        tx_hash="hl:x",
+        wallet_address="0xabc",
+        value=Decimal("0.01"),
+        gain=Decimal("0.01"),
+        cost_unknown=True,
+    )
+    set_locale("pt")
+    system, user, _ = agent.build_prompt(get_settings(), "2026-10", "draft", [row], Totals(), Totals(), "a")
+    data = json.loads(user.split("<dados>\n", 1)[1].split("\n</dados>", 1)[0])
+    assert data["linhas"][0]["custo_desconhecido"] is True
+    assert data["linhas"][0]["custo_informado"] is False
+    assert data["mes_por_extenso"] == "outubro de 2026"
+    assert "internas" in system and "custo_desconhecido" in system
+    set_locale("en")
+    assert agent._month_long("2026-10") == "October 2026"
+    assert agent._month_long("lixo") == "lixo"
+    set_locale("pt")
