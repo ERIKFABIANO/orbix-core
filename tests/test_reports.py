@@ -152,7 +152,9 @@ async def test_draft_csv_is_embedded_and_marked(
     assert link["filename"] == "orbix-declare-2026-09-rascunho.csv"
     prefix = "data:text/csv;charset=utf-8;base64,"
     assert link["url"].startswith(prefix)
-    lines = base64.b64decode(link["url"][len(prefix) :]).decode().splitlines()
+    content = base64.b64decode(link["url"][len(prefix) :])
+    assert content[:3] == bytes([0xEF, 0xBB, 0xBF])  # marca de UTF-8 para o Excel (B16)
+    lines = content.decode("utf-8-sig").splitlines()
     assert lines[0] == (
         "data,tipo,ativo,quantidade,ptax,valor_brl,custo_brl,ganho_brl,preco_manual,"
         "taxas_brl,custo_desconhecido,rede,carteira,custo_informado"

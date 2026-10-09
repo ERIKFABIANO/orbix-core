@@ -198,7 +198,11 @@ async def load_user(conn: asyncpg.Connection, settings: Settings, user_id: UUID)
 
 
 async def consume_agent_question(conn: asyncpg.Connection, settings: Settings, user_id: UUID) -> int:
-    """Gasta uma pergunta do mês e devolve quantas restam. Levanta `quota` se acabou."""
+    """Gasta uma pergunta do mês e devolve quantas restam. Levanta `quota` se acabou.
+
+    A checagem e o desconto são um único UPDATE: duas perguntas ao mesmo tempo com uma
+    restante não passam as duas. Quem chama desconta antes de chamar o modelo e devolve
+    com `refund_agent_question` se o modelo falhar."""
     period = _month_start(date.today())
     row = await conn.fetchrow(
         """
@@ -206,17 +210,36 @@ async def consume_agent_question(conn: asyncpg.Connection, settings: Settings, u
            set agent_questions_used = case when agent_period = $2 then agent_questions_used else 0 end + 1,
                agent_period = $2
          where id = $1
+           and case when agent_period = $2 then agent_questions_used else 0 end
+               < case when plan = 'free' then $3::int else $4::int end
         returning plan, agent_questions_used
         """,
         user_id,
         period,
+        settings.free_agent_questions,
+        settings.paid_agent_questions,
     )
     if row is None:
-        raise AppError("unauthorized", 401)
-    limit = agent_quota(settings, row["plan"])
-    if row["agent_questions_used"] > limit:
-        raise AppError("quota", 429)
-    return int(limit - row["agent_questions_used"])
+        exists = await conn.fetchval("select exists(select 1 from public.profiles where id = $1)", user_id)
+        raise AppError("quota", 429) if exists else AppError("unauthorized", 401)
+    return int(agent_quota(settings, row["plan"]) - row["agent_questions_used"])
+
+
+async def refund_agent_question(conn: asyncpg.Connection, settings: Settings, user_id: UUID) -> int:
+    """Devolve a pergunta descontada quando o modelo não respondeu. Devolve quantas restam."""
+    row = await conn.fetchrow(
+        """
+        update public.profiles
+           set agent_questions_used = greatest(agent_questions_used - 1, 0)
+         where id = $1 and agent_period = $2
+        returning plan, agent_questions_used
+        """,
+        user_id,
+        _month_start(date.today()),
+    )
+    if row is None:
+        return 0
+    return max(0, int(agent_quota(settings, row["plan"]) - row["agent_questions_used"]))
 
 
 async def delete_account(conn: asyncpg.Connection, user_id: UUID) -> None:

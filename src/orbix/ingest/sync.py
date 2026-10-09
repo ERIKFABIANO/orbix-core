@@ -21,6 +21,8 @@ log = structlog.get_logger()
 
 HL_FILLS_PAGE = 2000
 HL_FUNDING_PAGE = 500
+# o extrato não documenta o tamanho da página: com 500, uma página cheia sempre pede a seguinte
+HL_LEDGER_PAGE = 500
 
 
 @dataclass
@@ -143,17 +145,21 @@ async def _fill_symbols(db: Database, helius: HeliusClient) -> None:
         )
 
 
-def _split_cursor(cursor: str | None) -> tuple[int, int]:
+def _split_cursor(cursor: str | None) -> tuple[int, int, int]:
+    """fills:funding:extrato. Cursor antigo, de antes de o extrato ser lido, tem só as duas
+    primeiras partes: o extrato começa do zero e é lido inteiro na próxima sincronização."""
     try:
-        fills, funding = (cursor or "0:0").split(":")
-        return int(fills), int(funding)
+        parts = [int(part) for part in (cursor or "0:0:0").split(":")]
     except ValueError:
-        return 0, 0
+        return 0, 0, 0
+    if len(parts) not in (2, 3):
+        return 0, 0, 0
+    return parts[0], parts[1], parts[2] if len(parts) == 3 else 0
 
 
 async def _sync_hyperliquid(db: Database, sources: Sources, wallet: asyncpg.Record) -> tuple[str, int]:
     address = wallet["address"]
-    fills_from, funding_from = _split_cursor(wallet["sync_cursor"])
+    fills_from, funding_from, ledger_from = _split_cursor(wallet["sync_cursor"])
     read = 0
 
     async def drain(fetch: Any, normalize: Any, start: int, page_size: int) -> int:
@@ -178,8 +184,15 @@ async def _sync_hyperliquid(db: Database, sources: Sources, wallet: asyncpg.Reco
     funding_next = await drain(
         sources.hyperliquid.funding, hyperliquid.normalize_funding, funding_from, HL_FUNDING_PAGE
     )
+    # depósitos, saques, transferências de token, airdrops e staking (B17)
+    ledger_next = await drain(
+        sources.hyperliquid.ledger,
+        lambda entry: hyperliquid.normalize_ledger(entry, address),
+        ledger_from,
+        HL_LEDGER_PAGE,
+    )
     await _fill_hyperliquid_symbols(db, sources.hyperliquid)
-    return f"{fills_next}:{funding_next}", read
+    return f"{fills_next}:{funding_next}:{ledger_next}", read
 
 
 async def _fill_hyperliquid_symbols(db: Database, client: HyperliquidClient) -> None:

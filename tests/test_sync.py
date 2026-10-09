@@ -177,7 +177,7 @@ async def test_hyperliquid_sync(
         "select status, sync_cursor from public.wallets where id = $1", UUID(added["id"])
     )
     assert wallet["status"] == "synced"
-    assert wallet["sync_cursor"] == f"{TS * 1000 + 1}:{TS * 1000 + 6}"
+    assert wallet["sync_cursor"] == f"{TS * 1000 + 1}:{TS * 1000 + 6}:{TS * 1000 + 6}"
 
 
 @respx.mock

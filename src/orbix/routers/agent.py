@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Literal, cast
 
 from fastapi import APIRouter, Depends, Request
@@ -53,26 +54,46 @@ async def ask_agent(
     month_rows = tax.rows_of(rows, month)
     totals = tax.totals_of(month_rows, settings)
     previous = tax.totals_of(tax.rows_of(rows, _previous(month)), settings)
+    report_rows = tax.report_rows(month_rows)
+    # pergunta sobre uma linha (id vindo do detalhe do evento, ou ativo e data no texto)
+    focus = agent.find_row(body.message, report_rows, body.event_id)
     system, user_message, refs = agent.build_prompt(
-        settings, month, status, tax.report_rows(month_rows), totals, previous, body.message
+        settings,
+        month,
+        status,
+        report_rows,
+        totals,
+        previous,
+        body.message,
+        focus,
+        sum((row.value for row in month_rows if row.value is not None), Decimal(0)),
     )
     answer = None
+    left = profile.agent_questions_left
+    if llm is not None and rules_reason is None:
+        # a cota sai antes da chamada: duas perguntas simultâneas com uma restante não chamam
+        # o modelo duas vezes. Se o modelo falhar, a pergunta é devolvida.
+        try:
+            async with db.service() as conn:
+                left = await auth_service.consume_agent_question(conn, settings, user.id)
+        except AppError as exc:
+            if exc.code != "quota":
+                raise
+            rules_reason, left = "quota", 0
     if llm is not None and rules_reason is None:
         try:
-            answer = await agent.ask(llm, system, history, user_message)
-        except AppError as exc:
-            if exc.code != "agent_unavailable":
+            answer = agent.sanitize(await agent.ask(llm, system, history, user_message), refs)
+        except Exception as exc:
+            # resposta por regras não gasta a cota
+            async with db.service() as conn:
+                left = await auth_service.refund_agent_question(conn, settings, user.id)
+            if not isinstance(exc, AppError) or exc.code != "agent_unavailable":
                 raise
             rules_reason = "unavailable"
     if answer is None:
-        answer = agent.rules_answer(month, tax.report_rows(month_rows), totals, refs)
+        answer = agent.rules_answer(month, report_rows, totals, refs, focus)
     blocks, source = agent.build_blocks(answer, refs, status, month)
 
-    # a pergunta só é descontada da cota quando o modelo respondeu; resposta por regras não gasta
-    left = profile.agent_questions_left
-    if rules_reason is None:
-        async with db.service() as conn:
-            left = await auth_service.consume_agent_question(conn, settings, user.id)
     async with db.as_user(user.id) as conn:
         message_id, created_at = await agent.save_exchange(
             conn, conversation, month, body.message, blocks, answer.text

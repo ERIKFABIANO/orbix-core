@@ -1,10 +1,11 @@
 """Chamada ao modelo de linguagem. O modelo devolve um objeto estruturado, nunca HTML ou links."""
 
+import time
 from typing import Any, Literal, Protocol
 
 import structlog
-from openai import APIError, AsyncOpenAI
-from pydantic import BaseModel
+from openai import AsyncOpenAI, OpenAIError
+from pydantic import BaseModel, ValidationError
 
 from orbix.errors import AppError
 
@@ -49,6 +50,7 @@ class OpenAIAgent:
 
     async def answer(self, system: str, messages: list[dict[str, str]]) -> AgentAnswer:
         payload: list[Any] = [{"role": "system", "content": system}, *messages]
+        started = time.monotonic()
         try:
             completion = await self._client.chat.completions.parse(
                 model=self._model,
@@ -56,10 +58,21 @@ class OpenAIAgent:
                 response_format=AgentAnswer,
                 max_completion_tokens=1200,
             )
-        except APIError as exc:
+        except (OpenAIError, ValidationError) as exc:
+            # OpenAIError cobre também a resposta cortada por tamanho e a barrada pelo filtro de
+            # conteúdo, que não são APIError: antes viravam erro 500 em vez da resposta por regras
             log.error("agente: falha na chamada ao modelo", kind=type(exc).__name__)
             raise AppError("agent_unavailable", 503) from None
-        parsed = completion.choices[0].message.parsed
+        # custo e tempo por pergunta, sem o conteúdo: serve para escolher modelo e plano
+        usage = completion.usage
+        log.info(
+            "agente: resposta do modelo",
+            model=self._model,
+            seconds=round(time.monotonic() - started, 2),
+            prompt_tokens=usage.prompt_tokens if usage else None,
+            completion_tokens=usage.completion_tokens if usage else None,
+        )
+        parsed = completion.choices[0].message.parsed if completion.choices else None
         if parsed is None:
             raise AppError("agent_unavailable", 503)
         return parsed.clamp()

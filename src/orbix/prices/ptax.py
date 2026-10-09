@@ -1,5 +1,6 @@
 """PTAX do Banco Central (dólar oficial). API pública, sem chave."""
 
+import time
 from bisect import bisect_right
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -18,6 +19,10 @@ URL = (
 )
 # feriados prolongados: olhar alguns dias para trás garante achar o último dia útil
 LOOKBACK = timedelta(days=10)
+# quando a cotação mais nova ainda não saiu, espera isto (em segundos) antes de perguntar de novo
+RETRY_AFTER = 45 * 60
+# (fim da janela, última data guardada) -> instante da última consulta que não trouxe nada novo
+_tail_attempts: dict[tuple[date, date | None], float] = {}
 
 
 def brt_date(moment: datetime) -> date:
@@ -31,7 +36,8 @@ async def fetch(
         "@dataInicial": f"'{start:%m-%d-%Y}'",
         "@dataFinalCotacao": f"'{end:%m-%d-%Y}'",
         "$format": "json",
-        "$select": "cotacaoCompra,cotacaoVenda,dataHoraCotacao",
+        # sem "$select": o Banco Central passou a responder 403 quando ele vem (visto em
+        # 09/10/2026). A resposta padrão já traz os três campos usados aqui.
     }
     response = await http.get(URL, params=params, timeout=20)
     response.raise_for_status()
@@ -71,18 +77,26 @@ async def ensure_range(conn: asyncpg.Connection, http: httpx.AsyncClient, start:
     # janela já coberta nas duas pontas: nada a buscar. Na ponta final só fim de semana pode
     # faltar. Antes havia uma folga de 4 dias aqui: com a PTAX de sexta guardada, a de segunda
     # e a de terça nunca eram buscadas, e o evento de terça saía com o câmbio de sexta (B15).
-    if (
-        bounds
-        and bounds["n"]
-        and bounds["lo"] <= start + LOOKBACK
-        and not _has_weekday_after(bounds["hi"], end)
-    ):
+    # última data guardada, quando o começo da janela já está coberto; senão None
+    last: date | None = bounds["hi"] if bounds and bounds["n"] and bounds["lo"] <= start + LOOKBACK else None
+    if last is not None and not _has_weekday_after(last, end):
+        return
+    # só falta a ponta final (a PTAX de hoje antes das 13h, ou um feriado): o Banco Central já
+    # foi consultado há pouco e não tinha. Sem isto, toda sincronização e toda recotação
+    # repetiam a consulta até a cotação sair.
+    attempt = (end, last)
+    asked_at = _tail_attempts.get(attempt)
+    if last is not None and asked_at is not None and time.monotonic() - asked_at < RETRY_AFTER:
         return
     try:
         rows = await fetch(http, start, end)
     except (httpx.HTTPError, ValueError, KeyError):
         log.warning("ptax: falha ao consultar o Banco Central")
         return
+    if last is not None and (not rows or rows[-1][0] <= last):
+        if len(_tail_attempts) > 500:
+            _tail_attempts.clear()
+        _tail_attempts[attempt] = time.monotonic()
     await conn.executemany(
         "insert into public.fx_rates (date, ptax_buy, ptax_sell, quoted_at) values ($1, $2, $3, $4) "
         "on conflict (date) do update set ptax_buy = excluded.ptax_buy, "

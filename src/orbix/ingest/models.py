@@ -49,6 +49,22 @@ def is_stable(chain: str, asset: str, symbol: str | None = None) -> bool:
     return chain == "hyperliquid" and (symbol or "").upper() in HYPERLIQUID_STABLE_SYMBOLS
 
 
+def position_token(chain: str, asset: str, symbol: str | None) -> str | None:
+    """Token a que um ativo da Hyperliquid se refere, para o custo médio.
+
+    Na Hyperliquid o fill grava o código do par ("@334" = KNTQ/USDC, "@254" = KNTQ/USDH) e o
+    extrato grava o nome do token ("KNTQ"). São o mesmo ativo: sem juntar, comprar num par e
+    vender no outro, ou receber por transferência e vender, saía com custo zero. Devolve None
+    quando o ativo já é a própria identidade (Solana, ou par ainda sem nome resolvido)."""
+    if chain != "hyperliquid":
+        return None
+    if asset.startswith("@"):
+        return symbol or None
+    if "/" in asset:
+        return asset.split("/", 1)[0]
+    return None
+
+
 def short(asset: str) -> str:
     return asset if len(asset) <= 12 else f"{asset[:4]}…{asset[-4:]}"
 

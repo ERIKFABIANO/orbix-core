@@ -8,6 +8,11 @@ Regras adotadas (estimativa; não substitui orientação de um contador):
 - Transferência recebida e recompensa entram na posição pelo valor de mercado do dia.
 - Transferência enviada, taxa de rede e staking não geram ganho; só reduzem ou mantêm a posição.
 - Transferência entre duas carteiras do mesmo usuário é ignorada.
+- Hyperliquid, extrato da conta: airdrop entra com custo zero; token que chega pela ponte da
+  HyperEVM já era do usuário, então o custo não é o valor do dia: entra sem custo comprovado
+  e a venda fica marcada até o usuário informar o custo. Dólar (stablecoin) que entra ou sai
+  por depósito, saque ou transferência aparece no painel, mas não mexe no custo médio:
+  continua valendo o próprio valor na venda, como antes de o extrato ser lido.
 - Vender mais do que o histórico conhecido: a parte sem origem tem custo zero (custo não
   comprovado) e a linha é marcada com `cost_unknown`. Stablecoin entra pelo próprio valor.
   Com `unknown_cost="market"`, a parte sem origem também entra pelo valor da venda.
@@ -57,6 +62,8 @@ class Event:
     cost_override: Decimal | None = None
     # preço em dólar de uma unidade do ativo, quando a fonte informa
     usd_price: Decimal | None = None
+    # token da posição quando o mesmo ativo aparece com códigos diferentes (pares da Hyperliquid)
+    position_token: str | None = None
 
 
 @dataclass
@@ -128,10 +135,14 @@ class Totals:
 class _Position:
     qty: Decimal = ZERO
     cost: Decimal = ZERO
+    # parte da quantidade que entrou sem custo comprovado (veio de outra rede do próprio usuário)
+    unproven: Decimal = ZERO
 
-    def add(self, qty: Decimal, cost: Decimal) -> None:
+    def add(self, qty: Decimal, cost: Decimal, *, unproven: bool = False) -> None:
         self.qty += qty
         self.cost += cost
+        if unproven:
+            self.unproven += qty
 
     def remove(self, qty: Decimal) -> Decimal:
         """Tira `qty` da posição e devolve o custo médio correspondente."""
@@ -139,6 +150,7 @@ class _Position:
             return ZERO
         taken = min(qty, self.qty)
         cost = self.cost * taken / self.qty
+        self.unproven -= self.unproven * taken / self.qty
         self.qty -= taken
         self.cost -= cost
         return cost
@@ -166,7 +178,7 @@ def _decimal(value: Any) -> Decimal:
 
 
 def _key(event: Event) -> str:
-    return f"{event.chain}:{event.asset}"
+    return f"{event.chain}:{event.position_token or event.asset}"
 
 
 def _label(events: list[Event]) -> str:
@@ -260,6 +272,16 @@ def _order_key(event: Event) -> str:
     return event.tx_hash
 
 
+_DUST = Decimal("0.000000000001")
+
+
+def _off_position(event: Event) -> bool:
+    """Dólar movimentado pelo extrato da Hyperliquid (depósito, saque, transferência): fica
+    visível, mas não entra no custo médio. O dólar comprado com ele continua saindo pelo
+    próprio valor, como antes de o extrato ser lido."""
+    return event.stable and bool(event.raw.get("ledger"))
+
+
 def _is_real_hash(tx_hash: str) -> bool:
     return not tx_hash.startswith("hl:") and set(tx_hash.removeprefix("0x")) != {"0"}
 
@@ -333,6 +355,10 @@ def _swap_row(
     for leg in outs:
         position = state.positions[_key(leg)]
         covered = min(leg.qty, max(position.qty, ZERO))
+        # parte do que está sendo vendido entrou sem custo comprovado: o custo médio está
+        # subestimado até o usuário informar quanto pagou
+        if not leg.stable and position.qty > 0 and position.unproven > _DUST:
+            cost_unknown = True
         cost += position.remove(leg.qty)
         # stablecoin que entrou antes do histórico conhecido: o custo é o próprio valor.
         # Sem isto, vender USDC antigo apareceria como ganho de 100%.
@@ -519,15 +545,23 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
             if event.kind in ("transfer_in", "transfer_out") and (event.tx_hash, event.asset) in internal:
                 continue
             if event.kind in ("transfer_in", "reward"):
-                state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
+                if not _off_position(event):
+                    # ponte da HyperEVM: o token já era do usuário e o custo não é conhecido
+                    bridged = event.raw.get("bridge") is True
+                    cost = event.brl_value or ZERO
+                    if bridged and unknown_cost != "market":
+                        cost = ZERO
+                    state.positions[_key(event)].add(event.qty, cost, unproven=bridged)
                 rows.append(_transfer_row(event, "in"))
             elif event.kind == "swap_in":
                 state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
             elif event.kind == "transfer_out":
-                state.positions[_key(event)].remove(event.qty)
+                if not _off_position(event):
+                    state.positions[_key(event)].remove(event.qty)
                 rows.append(_transfer_row(event, "out"))
             elif event.kind in ("fee", "swap_out"):
-                state.positions[_key(event)].remove(event.qty)
+                if not _off_position(event):
+                    state.positions[_key(event)].remove(event.qty)
             elif event.kind == "perp_fill":
                 perp_rows.append(_perp_row(state, event))
             elif event.kind == "funding":

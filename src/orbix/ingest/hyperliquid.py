@@ -1,5 +1,6 @@
 """Fills e funding da Hyperliquid. A API de informação é pública, sem chave."""
 
+import re
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -145,6 +146,121 @@ def normalize_funding(entry: dict[str, Any]) -> list[EventDraft]:
     ]
 
 
+_ADDRESS = re.compile(r"^0x[0-9a-f]{40}$")
+# endereços de sistema da ponte HyperEVM <-> HyperCore: 0x20, zeros e o índice do token no fim
+_BRIDGE = re.compile(r"^0x20(?:0{30})[0-9a-f]{8}$")
+
+
+def _ledger_asset(token: Any) -> str | None:
+    """O extrato identifica o ativo pelo nome do token ("KNTQ"); os fills, pelo código do par
+    ("@334"). O motor fiscal junta os dois pela posição do token (ver `position_token`)."""
+    name = str(token or USDC).strip()[:40]
+    return name or None
+
+
+def normalize_ledger(entry: dict[str, Any], wallet: str) -> list[EventDraft]:
+    """Movimentos da conta que não são execução nem funding: depósito, saque, transferência
+    de token, airdrop, recompensa e staking (`userNonFundingLedgerUpdates`).
+
+    Sem eles, um token que entrou por transferência ou airdrop era vendido sem a entrada
+    correspondente e saía com custo zero (relatório de testes de 08/10, B17).
+    """
+    delta = entry.get("delta") or {}
+    kind_in = str(delta.get("type") or "")
+    time_ms = entry.get("time")
+    if not kind_in or not isinstance(time_ms, int):
+        return []
+    ts = datetime.fromtimestamp(time_ms / 1000, UTC)
+    raw_hash = entry.get("hash")
+    tx_hash = (
+        raw_hash[:100]
+        if isinstance(raw_hash, str) and raw_hash and raw_hash != _ZERO_HASH
+        else f"ledger-{kind_in[:30]}-{time_ms}"
+    )
+    me = wallet.lower()
+    raw: dict[str, Any] = {"ledger": kind_in[:30]}
+
+    def draft(
+        kind: str,
+        asset: str,
+        qty: Decimal,
+        usd_price: Decimal | None,
+        *,
+        other: str | None = None,
+        index: int = 0,
+    ) -> EventDraft:
+        stable = asset == USDC
+        data = {**raw, "counterparty": other} if other and _ADDRESS.match(other) else raw
+        return EventDraft(
+            tx_hash=tx_hash,
+            event_index=index,
+            ts=ts,
+            kind=kind,
+            asset=asset,
+            qty=qty,
+            raw=data,
+            usd_price=Decimal(1) if stable else usd_price,
+            pricing_policy="stable" if stable else "hyperliquid_ledger" if usd_price is not None else None,
+        )
+
+    if kind_in in ("deposit", "withdraw"):
+        amount = _decimal(delta.get("usdc"))
+        if amount is None or amount <= 0:
+            return []
+        if kind_in == "withdraw":
+            raw["fee"] = str(_decimal(delta.get("fee")) or Decimal(0))
+        return [draft("transfer_in" if kind_in == "deposit" else "transfer_out", USDC, amount, Decimal(1))]
+
+    if kind_in in ("spotTransfer", "send", "internalTransfer"):
+        sender = str(delta.get("user") or "").lower()
+        receiver = str(delta.get("destination") or "").lower()
+        token = USDC if kind_in == "internalTransfer" else delta.get("token")
+        amount = _decimal(delta.get("usdc") if kind_in == "internalTransfer" else delta.get("amount"))
+        asset = _ledger_asset(token)
+        # movimento entre contas da própria carteira (spot e perpétuos) não é entrada nem saída
+        if asset is None or amount is None or amount <= 0 or sender == receiver:
+            return []
+        if me not in (sender, receiver):
+            return []
+        value = _decimal(delta.get("usdcValue"))
+        price = value / amount if value is not None and value > 0 else None
+        raw["token"] = str(token or USDC)[:40]
+        if value is not None:
+            raw["usdcValue"] = str(value)
+        if receiver == me:
+            # endereço de sistema da ponte: o token veio da HyperEVM e já era da própria pessoa
+            if _BRIDGE.match(sender):
+                raw["bridge"] = True
+            return [draft("transfer_in", asset, amount, price, other=sender)]
+        events = [draft("transfer_out", asset, amount, price, other=receiver)]
+        fee = _decimal(delta.get("fee"))
+        fee_asset = _ledger_asset(delta.get("feeToken")) if delta.get("feeToken") else None
+        if fee is not None and fee > 0 and fee_asset is not None:
+            # a taxa da transferência sai da carteira no próprio token
+            events.append(draft("fee", fee_asset, fee, price if fee_asset == asset else None, index=1))
+        return events
+
+    if kind_in in ("spotGenesis", "rewardsClaim"):
+        amount = _decimal(delta.get("amount"))
+        asset = _ledger_asset(delta.get("token"))
+        if asset is None or amount is None or amount <= 0:
+            return []
+        raw["token"] = str(delta.get("token") or USDC)[:40]
+        # airdrop e recompensa: entram na posição; sem preço na fonte, o custo é zero
+        return [draft("reward", asset, amount, None)]
+
+    if kind_in == "cStakingTransfer":
+        amount = _decimal(delta.get("amount"))
+        asset = _ledger_asset(delta.get("token"))
+        if asset is None or amount is None or amount <= 0:
+            return []
+        # staking: o token continua da pessoa, a posição não muda
+        return [draft("stake" if delta.get("isDeposit") else "unstake", asset, amount, None)]
+
+    # accountClassTransfer (spot ↔ perpétuos da mesma conta), cofres e demais: não mexem na posição
+    return []
+
+
 class HyperliquidClient:
     def __init__(self, http: httpx.AsyncClient) -> None:
         self._http = http
@@ -167,17 +283,24 @@ class HyperliquidClient:
     async def funding(self, user: str, start_ms: int) -> list[dict[str, Any]]:
         return await self._info({"type": "userFunding", "user": user, "startTime": start_ms})
 
-    async def spot_meta_names(self) -> dict[str, str]:
-        """Nome do token base de cada par spot sem nome ('@107' etc.), pela lista pública
-        spotMeta. Pares já nomeados (ex.: PURR/USDC) não precisam disso."""
+    async def ledger(self, user: str, start_ms: int) -> list[dict[str, Any]]:
+        return await self._info({"type": "userNonFundingLedgerUpdates", "user": user, "startTime": start_ms})
+
+    async def _spot_meta(self) -> dict[str, Any] | None:
         try:
             response = await self._http.post(INFO_URL, json={"type": "spotMeta"}, timeout=20)
         except httpx.HTTPError:
-            return {}
+            return None
         if response.status_code >= 400:
-            return {}
+            return None
         data = response.json()
-        if not isinstance(data, dict):
+        return data if isinstance(data, dict) else None
+
+    async def spot_meta_names(self) -> dict[str, str]:
+        """Nome do token base de cada par spot sem nome ('@107' etc.), pela lista pública
+        spotMeta. Pares já nomeados (ex.: PURR/USDC) não precisam disso."""
+        data = await self._spot_meta()
+        if data is None:
             return {}
         tokens = {
             t.get("index"): str(t.get("name") or "") for t in data.get("tokens", []) if isinstance(t, dict)

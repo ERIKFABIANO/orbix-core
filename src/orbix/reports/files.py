@@ -13,6 +13,11 @@ CSV_HEADER = (
 )
 FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
+# marca de UTF-8 no início do arquivo: sem ela o Excel lê em outra codificação e a seta e as
+# reticências viram símbolos soltos (relatório de testes de 08/10, B16). Faz parte do arquivo,
+# então entra no hash.
+UTF8_BOM = b"\xef\xbb\xbf"
+
 
 def _number(value: Decimal | None, places: int) -> str:
     quantum = Decimal(1).scaleb(-places)
@@ -88,7 +93,7 @@ def build_csv(rows: list[Row], totals: Totals, *, nonce: str | None) -> bytes:
     )
     if nonce:
         lines.append(f"verificacao,{nonce}" + "," * 12)
-    return ("\n".join(lines) + "\n").encode("utf-8")
+    return UTF8_BOM + ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def build_decripto(

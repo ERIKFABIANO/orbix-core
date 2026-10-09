@@ -181,7 +181,7 @@ async def test_unavailable_without_model_and_input_limits(
     body = response.json()
     assert response.status_code == 200
     assert (body["message"]["source"], body["rulesReason"]) == ("rules", "unavailable")
-    assert body["message"]["blocks"][0]["text"].startswith("In 2026-09 there were")
+    assert body["message"]["blocks"][0]["text"].startswith("In September 2026 there were")
 
 
 def test_answer_is_clamped() -> None:

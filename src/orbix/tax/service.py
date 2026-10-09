@@ -9,7 +9,7 @@ import asyncpg
 
 from orbix.config import Settings, get_settings
 from orbix.i18n import tr
-from orbix.ingest.models import KNOWN_SYMBOLS, is_stable, short
+from orbix.ingest.models import KNOWN_SYMBOLS, is_stable, position_token, short
 from orbix.schemas import (
     CoverageOut,
     EventReviewOut,
@@ -36,6 +36,7 @@ PRICE_PROVIDERS = {
     "counter_leg": "Outra perna do swap",
     "stable": "Stablecoin (US$ 1)",
     "hyperliquid_fill": "Hyperliquid",
+    "hyperliquid_ledger": "Hyperliquid",
 }
 # motivos das revisões automáticas: não aparecem no histórico do usuário
 AUTOMATIC_REASONS = ("cotação automática", "server update; reason not supplied")
@@ -78,6 +79,7 @@ async def load_rows(conn: asyncpg.Connection) -> list[Row]:
             ptax_date=r["ptax_date"],
             cost_override=r["cost_override_brl"],
             usd_price=r["usd_price"],
+            position_token=position_token(r["chain"], r["asset"], r["symbol"]),
         )
         for r in records
     ]
@@ -194,6 +196,14 @@ def _unit_price(state: Any) -> float | None:
         return None
 
 
+def _iso_day(value: Any) -> str:
+    """ "2026-10-06" -> "06/10/2026"; devolve o texto como veio se não for uma data."""
+    try:
+        return date.fromisoformat(str(value)).strftime("%d/%m/%Y")
+    except ValueError:
+        return str(value)
+
+
 def _cost(state: Any) -> float | None:
     value = state.get("cost_override_brl") if isinstance(state, dict) else None
     try:
@@ -212,15 +222,45 @@ async def load_review_history(
         """
         select event_id, reason, evidence, before_state, after_state, created_at
           from public.event_reviews
-         where event_id = any($1::uuid[]) and actor_user_id is not null and not (reason = any($2::text[]))
+         where event_id = any($1::uuid[])
+           and ((actor_user_id is not null and not (reason = any($2::text[])))
+                -- recotação: o evento já tinha PTAX e passou a usar a de outro dia (B15)
+                or (reason = $3
+                    and before_state->>'ptax_date' is not null
+                    and before_state->>'ptax_date' is distinct from after_state->>'ptax_date'))
          order by created_at
         """,
         event_ids,
         list(AUTOMATIC_REASONS),
+        AUTOMATIC_REASONS[0],
     )
     history: dict[str, list[EventReviewOut]] = defaultdict(list)
     for r in records:
         before, after = r["before_state"], r["after_state"]
+        if r["reason"] == AUTOMATIC_REASONS[0]:
+            new_price = _unit_price(after)
+            if new_price is None:
+                continue
+            old_day, new_day = _iso_day(before.get("ptax_date")), _iso_day(after.get("ptax_date"))
+            history[str(r["event_id"])].append(
+                EventReviewOut(
+                    kind="price",
+                    reason=tr(
+                        f"Correção automática do câmbio: a PTAX de {old_day} foi trocada pela de "
+                        f"{new_day}, que ainda não tinha saído quando o evento foi lido.",
+                        f"Automatic exchange-rate correction: the PTAX of {old_day} was replaced by the "
+                        f"one of {new_day}, which had not been published when the event was read.",
+                    ),
+                    evidence=tr(
+                        f"PTAX de venda {before.get('ptax')} → {after.get('ptax')} (Banco Central)",
+                        f"PTAX selling rate {before.get('ptax')} → {after.get('ptax')} (Central Bank)",
+                    ),
+                    previous_price_brl=_unit_price(before),
+                    new_price_brl=new_price,
+                    created_at=r["created_at"],
+                )
+            )
+            continue
         evidence = r["evidence"] if isinstance(r["evidence"], dict) else {}
         new_cost, old_cost = _cost(after), _cost(before)
         is_cost = new_cost is not None and new_cost != old_cost

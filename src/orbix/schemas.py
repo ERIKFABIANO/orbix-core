@@ -357,6 +357,8 @@ class AgentIn(In):
     message: Annotated[str, StringConstraints(min_length=1, max_length=1000)]
     month: Annotated[str, StringConstraints(pattern=MONTH_RE.pattern)] | None = None
     conversation_id: Annotated[str, StringConstraints(max_length=64)] | None = None
+    # evento sobre o qual a pergunta foi feita (aberta a partir do detalhe do evento)
+    event_id: Annotated[str, StringConstraints(max_length=64)] | None = None
 
 
 class AgentMessageOut(Out):

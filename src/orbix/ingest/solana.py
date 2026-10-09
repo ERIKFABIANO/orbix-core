@@ -109,6 +109,11 @@ def normalize_transaction(tx: dict[str, Any], wallet: str) -> list[EventDraft]:
             for side in (outs, ins):
                 if side.get(SOL, RENT_NOISE_SOL) < RENT_NOISE_SOL:
                     del side[SOL]
+        elif token_out and not ins and outs.get(SOL, RENT_NOISE_SOL) < RENT_NOISE_SOL:
+            # primeiro envio de um token para alguém: quem envia paga o aluguel da conta de
+            # token do destinatário (~0,002 SOL). Isso aparecia como uma segunda saída, de SOL,
+            # cuja "contraparte" era a conta de token e não a pessoa. É custo do envio: vira taxa.
+            fee += outs.pop(SOL)
 
     if outs and ins:
         out_kind, in_kind = "swap_out", "swap_in"

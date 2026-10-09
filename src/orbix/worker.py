@@ -96,8 +96,13 @@ async def reprice_pending(ctx: dict[str, Any]) -> None:
     """Tenta de novo o preço de eventos que ficaram sem valor (ex.: CoinGecko pediu para esperar)."""
     db: Database = ctx["db"]
     # evento que ficou com a PTAX da véspera porque a do dia ainda não tinha saído
-    async with db.service() as conn:
-        refreshed = await ptax.refresh_stale(conn, ctx["sources"].http)
+    refreshed = 0
+    try:
+        async with db.service() as conn:
+            refreshed = await ptax.refresh_stale(conn, ctx["sources"].http)
+    except Exception:
+        # a correção da PTAX é independente: se falhar, os eventos sem preço ainda são cotados
+        log.exception("recotação da ptax falhou")
     if refreshed:
         log.info("ptax do dia aplicada", events=refreshed)
     async with db.service() as conn:
