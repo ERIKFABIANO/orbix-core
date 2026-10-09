@@ -386,6 +386,7 @@ async def test_public_verification(client: httpx.AsyncClient, admin: asyncpg.Con
         "slot": 331508764,
         "registeredAt": body["registeredAt"],
         "valid": True,
+        "superseded": False,
     }
     english = (
         await client.get(f"/api/verify/{report['public_id']}", headers={"Accept-Language": "en-US"})

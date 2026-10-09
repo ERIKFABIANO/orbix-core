@@ -233,6 +233,27 @@ def _protocol(event: Event) -> str | None:
 _USD_FEE_TOKENS = frozenset({"USDC", "USDH", "USDT0", "USDE"})
 
 
+def _received(leg: Event) -> Decimal:
+    """Quantidade que entrou de fato na carteira numa compra.
+
+    Na Hyperliquid a taxa de uma compra spot é cobrada no próprio ativo comprado: quem compra
+    10 HYPE com taxa de 0,007 HYPE recebe 9,993. Somar os 10 deixava a posição maior que o
+    saldo real (relatório de testes de 09/10, B18). O custo continua sendo o valor pago
+    inteiro, então a taxa passa a fazer parte do custo de aquisição do que chegou.
+
+    Stablecoin não muda: a taxa de uma venda é cobrada no dólar recebido, e descontá-la
+    mexeria no custo de todo dólar gasto depois. Sem o nome do token (par ainda sem nome
+    resolvido) ou com outra moeda de taxa, vale a quantidade do fill."""
+    if leg.chain != "hyperliquid" or leg.stable:
+        return leg.qty
+    token = str(leg.raw.get("feeToken") or "")
+    if not token or token != (leg.position_token or leg.symbol):
+        return leg.qty
+    fee = _decimal(leg.raw.get("fee"))
+    # taxa negativa é devolução ao formador de mercado: entra um pouco mais
+    return leg.qty - fee if fee != 0 and leg.qty - fee > 0 else leg.qty
+
+
 def _leg_fees_brl(outs: list[Event]) -> Decimal | None:
     """Taxa de cada fill quando vem no próprio evento (a Hyperliquid manda `fee`/`feeToken`
     em cada fill, em vez de um evento de taxa à parte).
@@ -370,7 +391,8 @@ def _swap_row(
             cost_unknown = True
     for leg in ins:
         leg_cost = (leg.brl_value or ZERO) if in_known else (acquired or ZERO) / len(ins)
-        state.positions[_key(leg)].add(leg.qty, leg_cost)
+        # entra o que chegou de fato; o custo é o que foi pago, inteiro
+        state.positions[_key(leg)].add(_received(leg), leg_cost)
 
     first = outs[0]
     # o usuário informou o custo desta venda (compra fora do histórico lido): vale o informado
@@ -406,7 +428,7 @@ def _swap_row(
         price_ts=first.price_ts,
         ptax_date=next((e.ptax_date for e in (*outs, *ins) if e.ptax_date is not None), None),
         fills=len(outs),
-        quantity_in=_total_qty(ins) if single_in else None,
+        quantity_in=sum((_received(leg) for leg in ins), ZERO) if single_in else None,
         quantity_in_asset=ins[0].symbol if single_in else None,
         position_before_qty=position_before,
         avg_cost_unit=cost / sold if single_out and value is not None and sold else None,
@@ -554,7 +576,7 @@ def compute_rows(events: list[Event], unknown_cost: UnknownCost = "zero") -> lis
                     state.positions[_key(event)].add(event.qty, cost, unproven=bridged)
                 rows.append(_transfer_row(event, "in"))
             elif event.kind == "swap_in":
-                state.positions[_key(event)].add(event.qty, event.brl_value or ZERO)
+                state.positions[_key(event)].add(_received(event), event.brl_value or ZERO)
             elif event.kind == "transfer_out":
                 if not _off_position(event):
                     state.positions[_key(event)].remove(event.qty)

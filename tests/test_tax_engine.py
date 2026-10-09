@@ -362,10 +362,21 @@ def test_real_wallet_one_row_per_order_and_no_mixed_assets() -> None:
     # venda de UBTC de 03/06: 0,00793 + 0,00449 da mesma ordem (B6)
     ubtc = next(r for r in swaps if r.asset == "UBTC → USDC" and r.fills == 2)
     assert ubtc.quantity == Decimal("0.01242")
-    # custo proporcional: 0,01242 dos 0,01243 comprados a US$ 76.819 (PTAX 5 no teste)
+    # custo proporcional ao que entrou de fato: a compra de 0,01243 pagou 0,0000040571 UBTC
+    # de taxa no próprio ativo, então chegaram 0,0124259429 (PTAX 5 no teste)
     bought = Decimal("0.01243") * Decimal("76819") * 5
-    assert abs(ubtc.cost - bought * Decimal("0.01242") / Decimal("0.01243")) < Decimal("0.01")
+    received = Decimal("0.01243") - Decimal("0.0000040571")
+    assert ubtc.position_before_qty == received
+    assert abs(ubtc.cost - bought * Decimal("0.01242") / received) < Decimal("0.01")
     assert ubtc.gain < 0  # perda real: comprou a 76.819 e vendeu a 63.069
+    # o resto que a Hyperliquid converteu no dia seguinte é exatamente o que sobrou: a posição
+    # fecha em zero, sem venda "sem custo" (antes sobravam 0,0000040571 que nunca existiram)
+    dust = next(r for r in swaps if r.asset == "UBTC → USDC" and r.fills == 1)
+    assert dust.quantity == received - Decimal("0.01242") == Decimal("0.0000059429")
+    assert dust.position_before_qty == dust.quantity and not dust.cost_unknown
+    # na compra, o que entrou é o líquido da taxa
+    buy = next(r for r in swaps if r.asset == "USDC → UBTC")
+    assert buy.quantity_in == received
     perps = [r for r in rows if r.type == "perp" and r.reportable]
     assert len(perps) == 3
 

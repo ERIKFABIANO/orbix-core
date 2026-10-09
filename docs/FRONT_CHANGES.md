@@ -6,6 +6,57 @@ Lista tudo que o front precisa ganhar ou ajustar para funcionar com o back-end r
 
 **Estado do back-end em 03/10/2026:** todas as rotas descritas aqui existem e têm teste. Login com carteira, e-mail e GitHub estão ligados em produção (`https://api-declare.orbixlab.com.br`), e o e-mail real já sai pelo Resend (`no-reply@orbixlab.com.br`). Google segue desligado até a chave existir (`GET /api/auth/providers` informa).
 
+## Novidades de 09/10: nova versão de um relatório final (B18)
+
+Relatório final não muda sozinho. Quando os dados do mês mudam depois da finalização (carteira relida, custo informado, câmbio corrigido), o `GET /api/report/:month` continua devolvendo os números congelados e passa a avisar.
+
+**O front atual já mostra o aviso** sem mudança: ele entra em `review.pendingReasons`, que a tela lista em "Pendências". Falta só o botão.
+
+### Campos novos em `ReportDetail` (todos opcionais)
+
+| Campo | Tipo | Quando vem |
+|---|---|---|
+| `version` | number | Relatório final: `1` na primeira finalização, `2` depois da primeira nova versão |
+| `outdated` | boolean | `true` quando os números congelados não batem mais com o cálculo de hoje |
+| `currentTotals` | `ReportTotals \| null` | O cálculo de hoje, só quando `outdated` é `true` |
+| `previousVersions` | lista | Versões anteriores: `{ version, hash, publicId, txSignature, slot, registeredAt, finalizedAt }` |
+
+### Rota nova: gerar a nova versão
+
+`POST /api/report/:month/reissue` (com token, sem corpo)
+
+Resposta `200`: o `ReportDetail` da versão nova, com `status: "final"`, `version` somado, `outdated: false` e `attestation: null` até a transação confirmar (mesmo comportamento da finalização).
+
+| Erro | Quando |
+|---|---|
+| `409 report_not_final` | O mês ainda é rascunho |
+| `409 attestation_pending` | A versão atual ainda não foi registrada na Solana. Tentar de novo em instantes |
+| `409 report_up_to_date` | Nada mudou desde a finalização |
+| `409 missing_prices`, `409 nothing_to_report` | Os mesmos da finalização |
+| `503 storage_unavailable` | Sem armazenamento |
+
+O que acontece com a versão anterior: nada é apagado. O arquivo, o hash e a transação dela continuam existindo, e o link público dela (`/v/:publicId`) continua abrindo.
+
+Sugestão de interface: no relatório final com `outdated: true`, um aviso com o ganho de hoje (`currentTotals.gainBrl`) ao lado do congelado e um botão **"Gerar nova versão"**, com a confirmação de que a versão anterior continua verificável. Em `previousVersions`, uma lista discreta com o link de verificação de cada uma.
+
+```ts
+reissueReport: (month: string) =>
+  http<ReportDetail>("POST", `/api/report/${enc(month)}/reissue`, undefined, { timeoutMs: SLOW_TIMEOUT_MS }),
+```
+
+### Arquivos com a versão no nome
+
+A partir da versão 2, `GET /api/report/:month/csv` devolve `filename: "orbix-declare-2026-05-v2.csv"` e `POST /api/report/:month/decripto` devolve `decripto-2026-05-v2.txt`. O front já usa o `filename` da resposta; nada a mudar.
+
+### Verificação pública de uma versão anterior
+
+`GET /api/verify/:publicId` ganhou o campo `superseded` (boolean). Para o link de uma versão anterior ele vem `true` e a `description` termina com "· versão anterior" (ou "· earlier version"). O arquivo antigo continua conferindo contra o hash antigo. Sugestão: uma linha na página dizendo que existe uma versão mais nova deste relatório.
+
+### Outras mudanças de 09/10 que aparecem na tela
+
+- `TaxEvent.quantityIn` numa compra de token na Hyperliquid passa a ser o que chegou na carteira, já sem a taxa cobrada no próprio token (10 HYPE comprados com taxa de 0,007 HYPE: `9.993`).
+- Carteiras da Hyperliquid lidas antes de 09/10 são relidas sozinhas quando o worker sobe: entram depósitos, saques, transferências e airdrops como linhas `type: "transfer"`.
+
 ## 0. Novidades de 03/10 (depois do commit `ff73498` do front)
 
 O `docs/FRONTEND_RELEASE_9_12.md` do front foi escrito olhando um commit antigo do back-end. Hoje **todas as rotas que ele lista como faltando existem**, com os campos novos. Abaixo, o que mudou e o que o front precisa para usar.

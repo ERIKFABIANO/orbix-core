@@ -19,7 +19,7 @@ from orbix.ingest.hyperliquid import HyperliquidClient
 from orbix.ingest.sync import Sources, price_and_finish, sync_wallet
 from orbix.logging import configure_logging
 from orbix.prices import ptax
-from orbix.queue import ACTIVE_TTL, active_key
+from orbix.queue import ACTIVE_TTL, active_key, sync_wallet_job_id
 
 log = structlog.get_logger()
 
@@ -44,6 +44,42 @@ async def startup(ctx: dict[str, Any]) -> None:
         coingecko_key=settings.coingecko_api_key.get_secret_value() if settings.coingecko_api_key else None,
         max_transactions=settings.ingest_max_transactions,
     )
+    await backfill_ledger(ctx)
+
+
+async def backfill_ledger(ctx: dict[str, Any]) -> int:
+    """Relê as carteiras da Hyperliquid que foram lidas antes de o extrato existir.
+
+    O cursor antigo tem duas partes ("fills:funding"); o extrato (depósitos, transferências,
+    airdrops) só era lido quando o usuário sincronizasse de novo. Até lá, um token recebido
+    por transferência ficava fora da posição (relatório de testes de 09/10, B18). Aqui o
+    worker enfileira essa leitura sozinho ao subir. Depois de lida, a carteira passa a ter o
+    cursor de três partes e sai desta lista: rodar de novo não repete o trabalho.
+    """
+    db: Database = ctx["db"]
+    try:
+        async with db.service() as conn:
+            wallets = await conn.fetch(
+                """
+                select id from public.wallets
+                 where chain = 'hyperliquid' and status in ('synced', 'empty', 'error')
+                   and sync_cursor ~ '^[0-9]+:[0-9]+$'
+                 order by last_synced_at nulls last
+                 limit 500
+                """
+            )
+        for wallet in wallets:
+            # o mesmo job_id da sincronização manual: se o usuário clicar ao mesmo tempo, não duplica
+            await ctx["redis"].enqueue_job(
+                "sync_wallet", str(wallet["id"]), _job_id=sync_wallet_job_id(wallet["id"])
+            )
+    except Exception:
+        # nunca impede o worker de subir: as carteiras continuam podendo ser lidas à mão
+        log.exception("releitura do extrato não foi enfileirada")
+        return 0
+    if wallets:
+        log.info("extrato da hyperliquid: releitura enfileirada", wallets=len(wallets))
+    return len(wallets)
 
 
 async def shutdown(ctx: dict[str, Any]) -> None:

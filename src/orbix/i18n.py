@@ -119,6 +119,18 @@ ERRORS: dict[str, tuple[str, str]] = {
         "Há {count} evento(s) sem preço neste mês. Informe o preço antes de finalizar.",
         "There are {count} event(s) without a price this month. Enter the price before finalizing.",
     ),
+    "report_not_final": (
+        "Este relatório ainda não foi finalizado. Finalize antes de gerar uma nova versão.",
+        "This report has not been finalized yet. Finalize it before generating a new version.",
+    ),
+    "attestation_pending": (
+        "O registro da versão atual na Solana ainda não foi confirmado. Tente de novo em instantes.",
+        "The current version is still being recorded on Solana. Try again in a moment.",
+    ),
+    "report_up_to_date": (
+        "Os números do mês não mudaram desde a finalização. Não há o que atualizar.",
+        "This month's numbers have not changed since the report was finalized. Nothing to update.",
+    ),
     "nothing_to_report": (
         "Não há alienações neste mês para declarar.",
         "There are no disposals to report this month.",

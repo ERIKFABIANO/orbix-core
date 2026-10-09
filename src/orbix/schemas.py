@@ -324,6 +324,18 @@ class ReportReviewOut(Out):
     decripto_ready: bool
 
 
+class ReportVersionOut(Out):
+    """Versão anterior de um relatório final: continua verificável pelo próprio link."""
+
+    version: int
+    hash: str
+    public_id: str
+    tx_signature: str
+    slot: int
+    registered_at: datetime
+    finalized_at: datetime | None = None
+
+
 class ReportDetailOut(Out):
     month: str
     status: ReportStatus
@@ -331,6 +343,14 @@ class ReportDetailOut(Out):
     rows: list[ReportRowOut]
     attestation: AttestationOut | None
     review: ReportReviewOut | None = None
+    # relatório final: 1 na primeira finalização, 2 depois da primeira nova versão...
+    version: int = 1
+    # relatório final cujos números congelados já não batem com o cálculo de hoje (carteira
+    # relida, custo informado, câmbio corrigido). `current_totals` traz o cálculo de hoje;
+    # POST /api/report/:month/reissue gera a nova versão.
+    outdated: bool = False
+    current_totals: ReportTotalsOut | None = None
+    previous_versions: list[ReportVersionOut] = []
 
 
 class DownloadLinkOut(Out):
@@ -348,6 +368,8 @@ class PublicVerificationOut(Out):
     slot: int
     registered_at: datetime
     valid: bool
+    # o link é de uma versão anterior: o dono gerou uma versão mais nova do relatório do mês
+    superseded: bool = False
 
 
 # ── agente ────────────────────────────────────────────────────────────────

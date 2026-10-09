@@ -516,3 +516,45 @@ async def test_wallet_read_before_the_ledger_existed_gets_it_on_the_next_sync(
         False,
         True,
     )
+
+
+def test_fee_charged_in_the_bought_token_does_not_enter_the_position() -> None:
+    """B18: a compra de HYPE paga a taxa em HYPE. Somar a quantidade cheia do fill deixava a
+    posição 0,60 HYPE acima do saldo real."""
+
+    def buy(qty: str, fee: str, fee_token: str, minutes: int, token: str | None = "HYPE") -> list[Event]:  # noqa: S107
+        tx = f"buyfee{minutes}"
+        raw = {"fee": fee, "feeToken": fee_token, "px": "40", "side": "B"}
+        return [
+            hl("swap_out", "USDC", "400", "2000", minutes=minutes, tx=tx, stable=True, raw=raw),
+            hl("swap_in", "@107", qty, "2000", token=token, minutes=minutes, tx=tx, raw=raw),
+        ]
+
+    events = [*buy("10", "0.007", "HYPE", 0), *sale("@107", "HYPE", "9.993", "2100", 5)]
+    bought, sold = compute_rows(events)
+    assert bought.quantity_in == Decimal("9.993")  # o que chegou na carteira
+    assert sold.position_before_qty == Decimal("9.993")
+    # o custo é o valor pago inteiro: a taxa vira parte do custo de aquisição
+    assert (sold.cost, sold.gain, sold.cost_unknown) == (Decimal("2000.00"), Decimal("100.00"), False)
+
+    # taxa em dólar (venda, ou compra com taxa em USDC) não mexe na quantidade comprada
+    usdc_fee = compute_rows([*buy("10", "0.28", "USDC", 0), *sale("@107", "HYPE", "10", "2100", 5)])
+    assert usdc_fee[0].quantity_in == Decimal("10") and usdc_fee[1].position_before_qty == Decimal("10")
+    # par ainda sem nome resolvido: não dá para saber se a taxa é no ativo comprado
+    unnamed = compute_rows(buy("10", "0.007", "HYPE", 0, token=None))
+    assert unnamed[0].quantity_in == Decimal("10")
+    # devolução de taxa ao formador de mercado (taxa negativa) entra a mais
+    rebate = compute_rows(buy("10", "-0.001", "HYPE", 0))
+    assert rebate[0].quantity_in == Decimal("10.001")
+    # taxa absurda (maior que a compra) é ignorada em vez de zerar a posição
+    assert compute_rows(buy("10", "11", "HYPE", 0))[0].quantity_in == Decimal("10")
+    # o dólar recebido numa venda continua pela quantidade do fill
+    proceeds = compute_rows(
+        [
+            hl(
+                "swap_out", "@107", "1", "200", token="HYPE", tx="s1", raw={"fee": "0.02", "feeToken": "USDC"}
+            ),
+            hl("swap_in", "USDC", "40", "200", tx="s1", stable=True, raw={"fee": "0.02", "feeToken": "USDC"}),
+        ]
+    )
+    assert proceeds[0].quantity_in == Decimal("40")

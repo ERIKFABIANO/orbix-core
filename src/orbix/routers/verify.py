@@ -63,16 +63,43 @@ async def verify_public(
     public_id = public_id.lower()
     if not PUBLIC_ID.fullmatch(public_id):
         raise not_found()
+    superseded = False
     async with db.service() as conn:
         row = await conn.fetchrow(
             "select month, sha256, solana_sig, slot, attested_at from public.reports "
             "where public_id = $1 and status = 'final' and solana_sig is not null",
             public_id,
         )
-    if row is None:
-        raise not_found()
+        if row is None:
+            # link de uma versão anterior: o dono gerou uma versão mais nova do relatório, mas
+            # o arquivo antigo e a transação dele continuam existindo e podem ser conferidos
+            owner = await conn.fetchrow(
+                "select month, data->'previous' as previous from public.reports "
+                "where status = 'final' and data->'previous' @> $1::jsonb limit 1",
+                [{"public_id": public_id}],
+            )
+            old = next(
+                (
+                    item
+                    for item in (owner["previous"] if owner else None) or []
+                    if isinstance(item, dict) and item.get("public_id") == public_id
+                ),
+                None,
+            )
+            if owner is None or old is None:
+                raise not_found()
+            superseded = True
+            found = {
+                "month": owner["month"],
+                "sha256": old["hash"],
+                "solana_sig": old["tx_signature"],
+                "slot": old["slot"],
+                "attested_at": old["registered_at"],
+            }
+        else:
+            found = dict(row)
 
-    cache_key = f"verify:{row['solana_sig']}"
+    cache_key = f"verify:{found['solana_sig']}"
     cached = await redis.get(cache_key)
     if cached is not None:
         valid = cached == b"1"
@@ -81,15 +108,15 @@ async def verify_public(
         checked = await memo_matches(
             http,
             settings.solana_memo_rpc_url.get_secret_value(),
-            row["solana_sig"],
-            memo_text(row["sha256"]),
+            found["solana_sig"],
+            memo_text(found["sha256"]),
         )
         # sem resposta do RPC, vale o que o worker confirmou ao gravar a transação
         valid = True if checked is None else checked
         if checked is not None:
             await redis.set(cache_key, b"1" if valid else b"0", ex=CACHE_TTL)
 
-    month = row["month"]
+    month = found["month"]
     locale = get_locale()
     period = f"{MONTHS[locale][month.month - 1]}/{month.year}"
     description = (
@@ -97,13 +124,16 @@ async def verify_public(
         if locale == "en"
         else f"Relatório mensal · {period} · titular ocultado"
     )
+    if superseded:
+        description += " · earlier version" if locale == "en" else " · versão anterior"
     return PublicVerificationOut(
         public_id=public_id,
         description=description,
         month=month.strftime("%Y-%m"),
-        hash=row["sha256"],
-        tx_signature=row["solana_sig"],
-        slot=row["slot"],
-        registered_at=row["attested_at"],
+        hash=found["sha256"],
+        tx_signature=found["solana_sig"],
+        slot=found["slot"],
+        registered_at=found["attested_at"],
         valid=valid,
+        superseded=superseded,
     )
