@@ -359,6 +359,18 @@ class DownloadLinkOut(Out):
     expires_at: datetime
 
 
+class DecriptoOficialOut(Out):
+    """Arquivo oficial da DeCripto (leiaute RFB). Cobre hoje só permutas on-chain na Solana
+    com protocolo identificado; `excluded_count` avisa quantas permutas elegíveis ficaram de
+    fora por falta de dado da contraparte."""
+
+    url: str
+    filename: str
+    expires_at: datetime
+    included_count: int
+    excluded_count: int
+
+
 class PublicVerificationOut(Out):
     public_id: str
     description: str

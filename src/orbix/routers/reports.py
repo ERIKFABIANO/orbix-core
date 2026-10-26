@@ -16,10 +16,12 @@ from orbix.errors import AppError, not_found
 from orbix.i18n import tr
 from orbix.queue import attest_job_id
 from orbix.ratelimit import limiter
+from orbix.reports.decripto_oficial import build_decripto_oficial
 from orbix.reports.files import build_csv, build_decripto
 from orbix.routers.dashboard import valid_month
 from orbix.schemas import (
     AttestationOut,
+    DecriptoOficialOut,
     DownloadLinkOut,
     ReportDetailOut,
     ReportReviewItemOut,
@@ -300,6 +302,35 @@ async def report_csv(
         url="data:text/csv;charset=utf-8;base64," + base64.b64encode(content).decode(),
         filename=f"orbix-declare-{month}-rascunho.csv",
         expires_at=datetime.now(UTC) + timedelta(minutes=10),
+    )
+
+
+@router.get("/report/{month}/decripto-oficial", response_model=DecriptoOficialOut)
+@limiter.limit("30/minute")
+async def report_decripto_oficial(
+    request: Request,
+    month: str,
+    user: CurrentUser = Depends(current_user),
+    db: Database = Depends(get_db),
+) -> DecriptoOficialOut:
+    """Arquivo oficial da DeCripto (leiaute RFB, Seção 6), sempre gerado na hora a partir do
+    estado atual do mês — não fica gravado, diferente do CSV/resumo de um relatório final.
+
+    Cobre hoje só permutas on-chain na Solana com protocolo de troca identificado (DEX).
+    `excludedCount` avisa quantas operações elegíveis não entraram por falta de informação
+    da contraparte; ver nota em `orbix.reports.decripto_oficial`.
+    """
+    valid_month(month)
+    async with db.as_user(user.id) as conn:
+        rows = await tax.load_rows(conn)
+    month_rows = tax.report_rows(tax.rows_of(rows, month))
+    result = build_decripto_oficial(month_rows)
+    return DecriptoOficialOut(
+        url="data:text/plain;charset=utf-8;base64," + base64.b64encode(result.content).decode(),
+        filename=f"decripto-oficial-{month}.txt",
+        expires_at=datetime.now(UTC) + timedelta(minutes=10),
+        included_count=len(result.included),
+        excluded_count=len(result.excluded),
     )
 
 
