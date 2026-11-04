@@ -1,4 +1,4 @@
-# orbix-core: estado em 03/10/2026
+# orbix-core: estado em 04/11/2026
 
 Resumo do back-end do Orbix Declare para quem não acompanhou a construção. Cobre o que está no ar, o que mudou no banco, as regras de cálculo adotadas e o que ainda falta.
 
@@ -6,21 +6,21 @@ Nenhum segredo está neste arquivo. Senhas, chaves e o IP da droplet ficam fora 
 
 ## Em uma frase
 
-O back-end do contrato está implementado e no ar: login (carteira, e-mail, Google, GitHub), carteiras, leitura da Solana e da Hyperliquid, preço em reais pela PTAX, motor fiscal, relatórios com arquivo no R2, verificação pública e agente. Faltam chaves e saldo para três partes funcionarem de verdade (lista em "O que falta").
+O back-end do contrato está implementado e no ar: login (carteira, e-mail, Google, GitHub), carteiras, leitura da Solana e da Hyperliquid, preço em reais pela PTAX, motor fiscal, relatórios com arquivo no R2 (incluindo o **arquivo oficial da DeCripto**, no leiaute da Receita Federal), verificação pública e agente. Falta só saldo na carteira de memo, para a gravação do hash sair de devnet e ir para a mainnet (lista em "O que falta").
 
 ## O que está no ar
 
 | Item | Estado |
 |---|---|
-| API | `https://api-declare.orbixlab.com.br`, todas as rotas do contrato |
-| Front | `https://declare.orbixlab.com.br` na Vercel, ainda em modo demonstração |
-| Banco | Supabase (us-east-1), migração `0005` aplicada em 03/10 |
-| Servidor | Droplet DigitalOcean em Nova York, 1 GB + 2 GB de swap, Docker Compose |
+| API | `https://api-declare.orbixlab.com.br`, todas as rotas do contrato, incluindo `GET /api/report/:month/decripto-oficial` (deploy de 04/11) |
+| Front | `https://declare.orbixlab.com.br` na Vercel |
+| Banco | Supabase (us-east-1), migração `0008` aplicada |
+| Servidor | Droplet DigitalOcean em Nova York, Docker Compose (api, worker, redis, caddy) |
 | Storage | Bucket `orbixdeclare` no Cloudflare R2 |
 
-Teste de ponta a ponta contra a produção em 02/10, com conta descartável: 27 verificações, todas passaram. Cobriu login com carteira, leitura real de uma carteira Solana (25 transações) e de uma Hyperliquid (4.209 operações em 10 segundos), painel, eventos, relatório, agente, finalização com upload e download no R2 e exclusão da conta. Para repetir: `uv run python scripts/smoke_prod.py <carteira Solana pública> [carteira Hyperliquid]`.
+206 testes (`uv run pytest --collect-only -q`), mais ruff, mypy strict e bandit. Para um teste de ponta a ponta contra a produção, com conta descartável: `uv run python scripts/smoke_prod.py <carteira Solana pública> [carteira Hyperliquid]`.
 
-**Atenção:** o código de 03/10 (finalizar relatório, custo de aquisição, revisão auditada, `ingestion_runs`, recotação agendada) está pronto e testado, mas ainda não foi publicado na droplet. A migração `0005` já está no banco e é compatível com o código que está no ar.
+**Resolvido desde 03/10:** o código daquela entrega (finalizar relatório, custo de aquisição, revisão auditada, `ingestion_runs`, recotação agendada) já está publicado na droplet. O CI do GitHub voltou a rodar (a conta não está mais bloqueada). O arquivo oficial da DeCripto (commit `6b09336`) foi implementado e, em 04/11, publicado em produção — o botão "Baixar DeCripto oficial" do front, que dava 404 por a rota ainda não ter sido deployada, já funciona.
 
 **O front já pode apontar para a API**, desde que as mudanças de `docs/FRONT_CHANGES.md` estejam feitas. Sem elas, o login com carteira e as telas atuais funcionam; e-mail, Google e GitHub precisam das telas novas.
 
@@ -46,7 +46,7 @@ O usuário é criado pelo back-end em `auth.users`, pela função `orbix_auth.cr
 | Carteiras | `GET /api/wallets`, `POST /api/wallets`, `DELETE /api/wallets/:id`, `POST /api/wallets/:id/sync` |
 | Leitura | `POST /api/ingest`, `GET /api/ingest/status` |
 | Painel | `GET /api/dashboard`, `GET /api/events`, `PUT /api/events/:id/price`, `PUT /api/events/:id/cost` |
-| Relatórios | `GET /api/reports`, `GET /api/report/:month`, `GET /api/report/:month/csv`, `POST /api/report/:month/finalize`, `POST /api/report/:month/decripto` |
+| Relatórios | `GET /api/reports`, `GET /api/report/:month`, `GET /api/report/:month/csv`, `POST /api/report/:month/finalize`, `POST /api/report/:month/decripto`, `GET /api/report/:month/decripto-oficial` |
 | Público | `GET /api/verify/:publicId`, `GET /health` |
 | Agente | `POST /api/agent` |
 
@@ -150,21 +150,19 @@ Estão em `src/orbix/tax/engine.py`. São estimativa, não orientação fiscal. 
 - Cloudflare na frente com SSL Full (strict), TLS 1.2 no mínimo e Authenticated Origin Pulls. Firewall da droplet aceita 80 e 443 só da Cloudflare.
 - Logs do servidor sem tokens, sem chaves e sem endereços completos. Conferido depois do teste em produção.
 
-**Verificações antes de cada entrega:** 143 testes, ruff, mypy strict e bandit, todos sem achados em 03/10.
+**Verificações antes de cada entrega:** 206 testes, ruff, mypy strict e bandit, todos sem achados em 04/11.
 
 ## O que falta
 
 | Item | Efeito hoje | Quem resolve |
 |---|---|---|
-| SOL na carteira de memo (devnet) | O relatório finaliza, mas a transação na Solana não é gravada e `attestation` fica `null`. A gravação é tentada de novo a cada consulta do relatório | Erik: abastecer pelo faucet |
+| Carteira de memo ainda em devnet | O hash do relatório é gravado em devnet, não em mainnet; a verificação pública (`/v/`) e o Explorer não mostram uma transação real de produção. A carteira `EMFpBvgKiweGoHvg2Zu1KyX9yeApas9kjckM82LwuUTd` tem **0 SOL na mainnet** (confirmado em 04/11) | Erik: enviar uma fração de SOL pra essa carteira, trocar `SOLANA_MEMO_CLUSTER`/`SOLANA_MEMO_RPC_URL` pra mainnet e fazer o deploy |
 | Google e GitHub | Desligados | Erik: criar os apps OAuth |
 | Chave da CoinGecko | Funciona sem chave, com limite menor. Ativos pouco negociados podem ficar sem preço até a rodada seguinte | Erik ou Filipe |
-| Leiaute oficial da DeCripto | O arquivo gerado é um resumo de apoio, não o leiaute de transmissão da Receita | Precisa do manual do leiaute |
+| Leiaute oficial da DeCripto | Implementado (commit `6b09336`, no ar desde 04/11) para a Seção 6 (compra/venda/permuta via carteira própria). Hyperliquid e transferências carteira-a-carteira ficam pra uma próxima versão | Erik, se decidir ampliar o escopo |
 | Revisão das regras fiscais | Os números são estimativa | Contador |
-| Conta do GitHub bloqueada por cobrança | Nenhum workflow roda. O deploy é manual | Erik |
 | Token do R2 restrito ao bucket | O token atual é mais amplo que o necessário | Erik |
 | Classificação com modelo de linguagem | Não implementada. A classificação por variação de saldo cobriu os casos testados | Avaliar depois do beta |
-| Publicar o código de 03/10 | Rotas novas ainda não estão no ar | Erik: ligar o ssh-agent e rodar o deploy |
 | Telas novas no front | Ver `docs/FRONT_CHANGES.md` | Filipe |
 
 ## Rodar local

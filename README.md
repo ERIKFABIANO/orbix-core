@@ -1,4 +1,43 @@
-# orbix-core
+<h1 align="center">Orbix Declare — Back-end</h1>
+
+<p align="center">
+  <b>orbix-core</b> reads Solana and Hyperliquid wallets, converts every event to Brazilian reais at the
+  Central Bank's PTAX rate, runs the tax engine, explains the numbers with an AI agent, and records each
+  report's hash on Solana.<br>
+  Built by <b>Orbix Lab</b> for the <b>Crypto World's Fair Hackathon</b> (Colosseum, 2026)<br>
+  Front-end: <a href="https://github.com/ERIKFABIANO/orbix-declare"><b>orbix-declare</b></a>
+</p>
+
+---
+
+## Colosseum submission
+
+```
+Front-end (orbix-declare: Next.js)
+        │  HTTPS · /api/*
+        ▼
+API (this repo: ingestion, PTAX, tax engine, AI agent)
+        ├──► Solana       (wallet history · report hash via Memo)
+        └──► Hyperliquid  (perps, funding, fills)
+```
+
+- **Front-end repository:** [ERIKFABIANO/orbix-declare](https://github.com/ERIKFABIANO/orbix-declare)
+- **Submitted commit (October 12, 2026 deadline):** [`bf7339a`](https://github.com/ERIKFABIANO/orbix-core/commit/bf7339a), tagged [`colosseum-submission`](https://github.com/ERIKFABIANO/orbix-core/tree/colosseum-submission)
+
+### What changed after October 12
+
+- **Official DeCripto file:** generated in the Receita Federal layout (Section 6, record 0210) —
+  [`6b09336`](https://github.com/ERIKFABIANO/orbix-core/commit/6b09336). This is the most important addition: it
+  closes the last manual step of the process, since users can now upload a ready-to-submit file instead of
+  retyping the summary into e-CAC.
+
+### Development history
+
+As stated in the submission, the back-end code was written during the event, starting on September 29, 2026.
+13 commits were made up to the October 12 deadline; the development history is linear, with no large
+first-commit anomaly to explain.
+
+---
 
 Back-end do **Orbix Declare**: lê carteiras Solana e Hyperliquid, converte cada evento para reais
 pela PTAX do Banco Central, calcula o relatório mensal, explica os números com um agente de IA e
